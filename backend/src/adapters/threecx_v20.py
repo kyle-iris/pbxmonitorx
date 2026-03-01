@@ -118,6 +118,18 @@ class BackupEntry:
     raw: dict = field(default_factory=dict)
 
 
+@dataclass
+class PhoneNumberData:
+    number: str
+    trunk_name: str
+    display_name: Optional[str] = None
+    number_type: str = "did"
+    is_main: bool = False
+    inbound: Optional[bool] = None
+    outbound: Optional[bool] = None
+    raw: dict = field(default_factory=dict)
+
+
 # ═════════════════════════════════════════════════════════════════════════════
 # ENDPOINT DISCOVERY TABLE
 # ═════════════════════════════════════════════════════════════════════════════
@@ -161,6 +173,13 @@ FEATURE_ENDPOINTS = {
         ("GET", "/api/BackupAndRestore/download/{id}",       "api_download"),
         ("GET", "/xapi/v1/Backups({id})/$value",             "xapi_download"),
         ("GET", "/webclient/api/BackupAndRestore/Download",  "webclient_download"),
+    ],
+    "phone_numbers": [
+        ("GET", "/xapi/v1/Trunks({trunk_id})/PhoneNumbers",  "xapi_trunk_phones"),
+        ("GET", "/api/InboundRuleList",                       "api_inbound_rules"),
+        ("GET", "/webclient/api/InboundRule/Get",             "webclient_inbound"),
+        ("GET", "/xapi/v1/Dids",                              "xapi_dids"),
+        ("GET", "/api/DidList",                               "api_did_list"),
     ],
     "version": [
         ("GET", "/xapi/v1/SystemStatus",                     "xapi_status"),
@@ -487,6 +506,239 @@ class ThreeCXv20Adapter:
                 continue
 
         return False, "No backup trigger endpoint found — PBX may not support remote trigger"
+
+    # ── 5. PHONE NUMBERS / DIDs ────────────────────────────────────────────
+
+    async def get_phone_numbers(self) -> list[PhoneNumberData]:
+        """Fetch all phone numbers/DIDs across all trunks.
+
+        Tries multiple strategies:
+        1. DID-specific endpoints (xapi/v1/Dids, api/DidList)
+        2. Inbound rule endpoints (often contain DID-to-trunk mappings)
+        3. Per-trunk phone number endpoints (iterates known trunks)
+        """
+        if not self._authenticated:
+            return []
+
+        client = await self._ensure_client()
+        numbers: list[PhoneNumberData] = []
+        seen: set[tuple[str, str]] = set()  # (number, trunk_name) dedup
+
+        # Strategy 1: Try DID-specific endpoints
+        did_endpoints = [
+            ("GET", "/xapi/v1/Dids", "xapi_dids"),
+            ("GET", "/api/DidList", "api_did_list"),
+        ]
+        for method, path, label in did_endpoints:
+            try:
+                resp = await client.request(method, path)
+                if resp.status_code == 200:
+                    data = self._try_json(resp)
+                    if data and self._has_content(data):
+                        items = self._unwrap_list(data, ["value", "list", "List", "Dids"])
+                        for item in items:
+                            pn = self._parse_did(item)
+                            if pn and (pn.number, pn.trunk_name) not in seen:
+                                numbers.append(pn)
+                                seen.add((pn.number, pn.trunk_name))
+                        if numbers:
+                            logger.info(f"Fetched {len(numbers)} DID(s) via {label}")
+                            break
+            except Exception as e:
+                logger.debug(f"DID fetch via {label} failed: {e}")
+
+        # Strategy 2: Try inbound rule endpoints (DIDs mapped to routes)
+        inbound_endpoints = [
+            ("GET", "/api/InboundRuleList", "api_inbound_rules"),
+            ("GET", "/webclient/api/InboundRule/Get", "webclient_inbound"),
+        ]
+        for method, path, label in inbound_endpoints:
+            try:
+                resp = await client.request(method, path)
+                if resp.status_code == 200:
+                    data = self._try_json(resp)
+                    if data and self._has_content(data):
+                        items = self._unwrap_list(data, ["value", "list", "List", "InboundRules"])
+                        for item in items:
+                            pn = self._parse_inbound_rule(item)
+                            if pn and (pn.number, pn.trunk_name) not in seen:
+                                numbers.append(pn)
+                                seen.add((pn.number, pn.trunk_name))
+                        if items:
+                            logger.info(f"Parsed {len(items)} inbound rule(s) via {label}")
+                            break
+            except Exception as e:
+                logger.debug(f"Inbound rule fetch via {label} failed: {e}")
+
+        # Strategy 3: Per-trunk phone numbers (requires known trunk IDs)
+        trunks = await self.get_trunks()
+        for trunk in trunks:
+            if not trunk.remote_id:
+                continue
+            trunk_numbers = await self.get_trunk_phone_numbers(trunk.remote_id, trunk.name)
+            for pn in trunk_numbers:
+                if (pn.number, pn.trunk_name) not in seen:
+                    numbers.append(pn)
+                    seen.add((pn.number, pn.trunk_name))
+
+        logger.info(f"Total phone numbers discovered: {len(numbers)}")
+        return numbers
+
+    async def get_trunk_phone_numbers(
+        self, trunk_id: str, trunk_name: str = "Unknown"
+    ) -> list[PhoneNumberData]:
+        """Fetch phone numbers for a specific trunk by trunk ID."""
+        if not self._authenticated:
+            return []
+
+        client = await self._ensure_client()
+        numbers: list[PhoneNumberData] = []
+
+        # Try the xapi per-trunk endpoint
+        path = f"/xapi/v1/Trunks({trunk_id})/PhoneNumbers"
+        try:
+            resp = await client.request("GET", path)
+            if resp.status_code == 200:
+                data = self._try_json(resp)
+                if data and self._has_content(data):
+                    items = self._unwrap_list(data, ["value", "list", "List", "PhoneNumbers"])
+                    for item in items:
+                        pn = self._parse_phone_number(item, trunk_name)
+                        if pn:
+                            numbers.append(pn)
+                    logger.debug(f"Trunk {trunk_name} ({trunk_id}): {len(numbers)} number(s)")
+        except Exception as e:
+            logger.debug(f"Per-trunk phone number fetch failed for {trunk_id}: {e}")
+
+        return numbers
+
+    def _parse_phone_number(self, item: dict, trunk_name: str = "Unknown") -> Optional[PhoneNumberData]:
+        """Parse a phone number from a trunk PhoneNumbers response."""
+        try:
+            number = (
+                item.get("Number") or item.get("number") or
+                item.get("PhoneNumber") or item.get("phoneNumber") or
+                item.get("Did") or item.get("did") or ""
+            ).strip()
+
+            if not number:
+                return None
+
+            display_name = (
+                item.get("DisplayName") or item.get("displayName") or
+                item.get("Name") or item.get("name") or
+                item.get("Label") or item.get("label")
+            )
+
+            is_main = bool(
+                item.get("IsMainNumber") or item.get("isMainNumber") or
+                item.get("IsMain") or item.get("isMain") or False
+            )
+
+            number_type = (
+                item.get("Type") or item.get("type") or
+                item.get("NumberType") or item.get("numberType") or "did"
+            ).lower()
+            # Normalize type
+            if number_type not in ("did", "main", "fax", "sip", "tollfree", "local", "international"):
+                number_type = "did"
+
+            return PhoneNumberData(
+                number=number,
+                trunk_name=trunk_name,
+                display_name=display_name,
+                number_type="main" if is_main else number_type,
+                is_main=is_main,
+                inbound=self._to_bool(item, "InboundEnabled", "inboundEnabled", "Inbound", "inbound"),
+                outbound=self._to_bool(item, "OutboundEnabled", "outboundEnabled", "Outbound", "outbound"),
+                raw=item,
+            )
+        except Exception as e:
+            logger.debug(f"Failed to parse phone number: {e}")
+            return None
+
+    def _parse_did(self, item: dict) -> Optional[PhoneNumberData]:
+        """Parse a DID entry from the Dids or DidList endpoint."""
+        try:
+            number = (
+                item.get("Did") or item.get("did") or
+                item.get("Number") or item.get("number") or
+                item.get("PhoneNumber") or item.get("phoneNumber") or ""
+            ).strip()
+
+            if not number:
+                return None
+
+            trunk_name = (
+                item.get("TrunkName") or item.get("trunkName") or
+                item.get("Trunk") or item.get("trunk") or
+                item.get("ProviderName") or item.get("providerName") or
+                "Unknown"
+            )
+
+            display_name = (
+                item.get("DisplayName") or item.get("displayName") or
+                item.get("Name") or item.get("name") or
+                item.get("Label") or item.get("label")
+            )
+
+            return PhoneNumberData(
+                number=number,
+                trunk_name=trunk_name,
+                display_name=display_name,
+                number_type="did",
+                is_main=bool(item.get("IsMainNumber") or item.get("isMainNumber") or False),
+                inbound=self._to_bool(item, "InboundEnabled", "inboundEnabled"),
+                outbound=self._to_bool(item, "OutboundEnabled", "outboundEnabled"),
+                raw=item,
+            )
+        except Exception as e:
+            logger.debug(f"Failed to parse DID: {e}")
+            return None
+
+    def _parse_inbound_rule(self, item: dict) -> Optional[PhoneNumberData]:
+        """Parse a phone number from an inbound rule entry.
+
+        Inbound rules in 3CX map external DIDs to internal destinations.
+        The DID/CallerID field contains the phone number.
+        """
+        try:
+            number = (
+                item.get("Did") or item.get("did") or
+                item.get("Number") or item.get("number") or
+                item.get("CallerID") or item.get("callerId") or
+                item.get("ExternalNumber") or item.get("externalNumber") or ""
+            ).strip()
+
+            if not number:
+                return None
+
+            trunk_name = (
+                item.get("TrunkName") or item.get("trunkName") or
+                item.get("Trunk") or item.get("trunk") or
+                item.get("Provider") or item.get("provider") or
+                "Unknown"
+            )
+
+            display_name = (
+                item.get("Name") or item.get("name") or
+                item.get("RuleName") or item.get("ruleName") or
+                item.get("DisplayName") or item.get("displayName")
+            )
+
+            return PhoneNumberData(
+                number=number,
+                trunk_name=trunk_name,
+                display_name=display_name,
+                number_type="did",
+                is_main=False,
+                inbound=True,  # Inbound rules imply inbound is enabled
+                outbound=None,
+                raw=item,
+            )
+        except Exception as e:
+            logger.debug(f"Failed to parse inbound rule: {e}")
+            return None
 
     # ── INTERNAL HELPERS ────────────────────────────────────────────────────
 

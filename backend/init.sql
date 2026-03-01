@@ -47,7 +47,10 @@ DO $$ BEGIN
         'alert_rule_created', 'alert_rule_updated', 'alert_rule_deleted',
         'alert_acknowledged', 'alert_resolved',
         'config_changed', 'poll_completed', 'poll_failed',
-        'session_expired', 'capability_probe'
+        'session_expired', 'capability_probe',
+        'sso_login', 'sso_login_failed', 'user_sso_login', 'user_sso_created',
+        'user_deactivated', 'user_password_reset',
+        'phone_numbers_synced', 'report_generated', 'backup_bulk_pull'
     );
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
@@ -57,8 +60,12 @@ CREATE TABLE IF NOT EXISTS app_user (
     id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     username          VARCHAR(100) NOT NULL,
     email             VARCHAR(255),
-    password_hash     VARCHAR(255) NOT NULL,     -- bcrypt, never plaintext
+    password_hash     VARCHAR(255),               -- bcrypt, never plaintext; NULL for SSO-only users
     role              user_role_t NOT NULL DEFAULT 'viewer',
+    auth_method       VARCHAR(20) NOT NULL DEFAULT 'local',  -- 'local' or 'azure_ad'
+    azure_oid         VARCHAR(100),               -- Azure AD Object ID
+    display_name      VARCHAR(200),               -- Full name from Azure AD
+    last_sso_sync     TIMESTAMPTZ,               -- Last Azure AD sync timestamp
     is_active         BOOLEAN NOT NULL DEFAULT true,
     failed_login_count INT NOT NULL DEFAULT 0,
     locked_until      TIMESTAMPTZ,               -- NULL = not locked
@@ -71,6 +78,10 @@ CREATE TABLE IF NOT EXISTS app_user (
     CONSTRAINT ck_app_user_username_len CHECK (char_length(username) >= 3),
     CONSTRAINT ck_app_user_role CHECK (role IN ('viewer', 'operator', 'admin'))
 );
+
+-- Azure OID must be unique when not null (partial unique index)
+CREATE UNIQUE INDEX IF NOT EXISTS idx_app_user_azure_oid
+    ON app_user (azure_oid) WHERE azure_oid IS NOT NULL;
 
 -- ── PBX Instances ───────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS pbx_instance (
@@ -148,6 +159,30 @@ CREATE TABLE IF NOT EXISTS trunk_state (
 
     CONSTRAINT uq_trunk_state UNIQUE (pbx_id, trunk_name)
 );
+
+-- ── Trunk Phone Numbers (DIDs per trunk) ────────────────────────────────────
+CREATE TABLE IF NOT EXISTS trunk_phone_number (
+    id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    pbx_id            UUID NOT NULL REFERENCES pbx_instance(id) ON DELETE CASCADE,
+    trunk_id          UUID REFERENCES trunk_state(id) ON DELETE SET NULL,
+    trunk_name        VARCHAR(300) NOT NULL,
+    phone_number      VARCHAR(50) NOT NULL,
+    display_name      VARCHAR(200),
+    number_type       VARCHAR(30) DEFAULT 'did',  -- did, tollfree, international, internal
+    is_main_number    BOOLEAN DEFAULT false,
+    inbound_enabled   BOOLEAN DEFAULT true,
+    outbound_enabled  BOOLEAN DEFAULT true,
+    description       TEXT,
+    extra_data        JSONB DEFAULT '{}',
+    last_seen_at      TIMESTAMPTZ,
+    created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+
+    CONSTRAINT uq_phone_pbx UNIQUE (pbx_id, phone_number)
+);
+CREATE INDEX IF NOT EXISTS idx_phone_pbx ON trunk_phone_number (pbx_id);
+CREATE INDEX IF NOT EXISTS idx_phone_trunk ON trunk_phone_number (trunk_name);
+CREATE INDEX IF NOT EXISTS idx_phone_number ON trunk_phone_number (phone_number);
 
 -- ── SBC State (current snapshot) ────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS sbc_state (
@@ -323,7 +358,7 @@ DECLARE
 BEGIN
     FOR tbl IN SELECT unnest(ARRAY[
         'app_user', 'pbx_instance', 'pbx_credential',
-        'backup_schedule', 'alert_rule'
+        'backup_schedule', 'alert_rule', 'trunk_phone_number'
     ])
     LOOP
         EXECUTE format(
@@ -353,6 +388,29 @@ ON CONFLICT DO NOTHING;
 
 -- Set threshold_days for the license rule
 UPDATE alert_rule SET threshold_days = 30 WHERE condition_type = 'license_expiring' AND threshold_days IS NULL;
+
+-- ── Migration helpers for existing databases ────────────────────────────────
+-- These ALTER statements are idempotent so the script can be re-run safely.
+
+-- SSO fields on app_user (for databases created before SSO support)
+ALTER TABLE app_user ADD COLUMN IF NOT EXISTS auth_method VARCHAR(20) NOT NULL DEFAULT 'local';
+ALTER TABLE app_user ADD COLUMN IF NOT EXISTS azure_oid VARCHAR(100);
+ALTER TABLE app_user ADD COLUMN IF NOT EXISTS display_name VARCHAR(200);
+ALTER TABLE app_user ADD COLUMN IF NOT EXISTS last_sso_sync TIMESTAMPTZ;
+
+-- Make password_hash nullable for SSO-only users (for databases created before SSO)
+ALTER TABLE app_user ALTER COLUMN password_hash DROP NOT NULL;
+
+-- New audit actions (for databases where the enum was created before these values)
+ALTER TYPE audit_action_t ADD VALUE IF NOT EXISTS 'sso_login';
+ALTER TYPE audit_action_t ADD VALUE IF NOT EXISTS 'sso_login_failed';
+ALTER TYPE audit_action_t ADD VALUE IF NOT EXISTS 'user_sso_login';
+ALTER TYPE audit_action_t ADD VALUE IF NOT EXISTS 'user_sso_created';
+ALTER TYPE audit_action_t ADD VALUE IF NOT EXISTS 'user_deactivated';
+ALTER TYPE audit_action_t ADD VALUE IF NOT EXISTS 'user_password_reset';
+ALTER TYPE audit_action_t ADD VALUE IF NOT EXISTS 'phone_numbers_synced';
+ALTER TYPE audit_action_t ADD VALUE IF NOT EXISTS 'report_generated';
+ALTER TYPE audit_action_t ADD VALUE IF NOT EXISTS 'backup_bulk_pull';
 
 -- ============================================================================
 -- VERIFICATION: List all tables

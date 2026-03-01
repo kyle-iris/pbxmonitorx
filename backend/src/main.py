@@ -5,9 +5,14 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.middleware.sessions import SessionMiddleware
 
 from src.core.config import get_settings
 from src.api.routes import router
+from src.api.phone_routes import router as phone_router
+from src.api.backup_routes import router as backup_router
+from src.api.user_routes import router as user_router
+from src.api.sso_routes import router as sso_router
 
 logging.basicConfig(
     level=logging.INFO,
@@ -30,10 +35,13 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="PBXMonitorX",
-    version="0.1.0",
+    version="0.2.0",
     description="3CX v20 Linux PBX Monitor & Backup Management",
     lifespan=lifespan,
 )
+
+# Session middleware required for SSO OAuth state management
+app.add_middleware(SessionMiddleware, secret_key=get_settings().jwt_secret)
 
 app.add_middleware(
     CORSMiddleware,
@@ -43,4 +51,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Core API routes
 app.include_router(router, prefix="/api")
+app.include_router(phone_router, prefix="/api")
+app.include_router(backup_router, prefix="/api")
+app.include_router(user_router, prefix="/api")
+app.include_router(sso_router, prefix="/api")
