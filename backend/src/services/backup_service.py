@@ -198,6 +198,15 @@ async def pull_latest_backup(db: AsyncSession, pbx_id: UUID) -> dict:
         ))
         await db.commit()
 
+        # Send backup success notification
+        try:
+            from src.services.notification_service import notify_backup_event
+            await notify_backup_event(db, pbx, "backup_success", {
+                "filename": target.filename, "size_bytes": file_size,
+            })
+        except Exception as e:
+            logger.warning(f"Backup notification failed: {e}")
+
         logger.info(f"Backup {target.filename} downloaded ({file_size} bytes) in {duration_ms}ms")
         return {
             "success": True,
@@ -209,6 +218,12 @@ async def pull_latest_backup(db: AsyncSession, pbx_id: UUID) -> dict:
 
     except Exception as e:
         logger.exception(f"Backup pull failed for {pbx.name}")
+        # Send backup failure notification
+        try:
+            from src.services.notification_service import notify_backup_event
+            await notify_backup_event(db, pbx, "backup_failed", {"error": str(e)})
+        except Exception as exc:
+            logger.warning(f"Backup failure notification failed: {exc}")
         return {"success": False, "error": str(e)}
     finally:
         await adapter.close()

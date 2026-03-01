@@ -142,13 +142,11 @@ async def poll_single_instance(db: AsyncSession, pbx_id: UUID) -> dict:
 
 
 async def poll_all_due_instances(db: AsyncSession) -> list[dict]:
-    """Find all PBX instances that are due for polling and poll them.
+    """Poll all due PBX instances with concurrent batches.
 
-    A PBX is "due" if:
-      - it's enabled
-      - last_poll_at is NULL, OR
-      - now - last_poll_at >= poll_interval_s (with backoff for failures)
+    Uses asyncio.gather in batches of 10 for scalability with 100+ instances.
     """
+    import asyncio
     now = datetime.now(timezone.utc)
 
     result = await db.execute(
@@ -156,12 +154,24 @@ async def poll_all_due_instances(db: AsyncSession) -> list[dict]:
     )
     instances = result.scalars().all()
 
+    due = [pbx for pbx in instances if _is_poll_due(pbx, now)]
+    if not due:
+        return []
+
     results = []
-    for pbx in instances:
-        if _is_poll_due(pbx, now):
-            # Poll in sequence per instance (don't hammer)
-            r = await poll_single_instance(db, pbx.id)
-            results.append(r)
+    batch_size = 10  # Poll 10 concurrently
+
+    for i in range(0, len(due), batch_size):
+        batch = due[i:i + batch_size]
+        batch_results = await asyncio.gather(
+            *[poll_single_instance(db, pbx.id) for pbx in batch],
+            return_exceptions=True,
+        )
+        for r in batch_results:
+            if isinstance(r, Exception):
+                results.append({"success": False, "error": str(r)})
+            else:
+                results.append(r)
 
     return results
 

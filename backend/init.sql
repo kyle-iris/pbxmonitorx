@@ -412,6 +412,85 @@ ALTER TYPE audit_action_t ADD VALUE IF NOT EXISTS 'phone_numbers_synced';
 ALTER TYPE audit_action_t ADD VALUE IF NOT EXISTS 'report_generated';
 ALTER TYPE audit_action_t ADD VALUE IF NOT EXISTS 'backup_bulk_pull';
 
+-- New audit actions for settings & notifications
+ALTER TYPE audit_action_t ADD VALUE IF NOT EXISTS 'settings_updated';
+ALTER TYPE audit_action_t ADD VALUE IF NOT EXISTS 'notification_sent';
+ALTER TYPE audit_action_t ADD VALUE IF NOT EXISTS 'notification_channel_created';
+ALTER TYPE audit_action_t ADD VALUE IF NOT EXISTS 'notification_channel_updated';
+ALTER TYPE audit_action_t ADD VALUE IF NOT EXISTS 'notification_channel_deleted';
+
+-- ── System Settings (key-value store) ─────────────────────────────────────
+CREATE TABLE IF NOT EXISTS system_setting (
+    key VARCHAR(100) PRIMARY KEY,
+    value JSONB NOT NULL DEFAULT '{}',
+    category VARCHAR(50) NOT NULL DEFAULT 'general',  -- general, branding, notifications, backup, integrations
+    description TEXT,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_by UUID REFERENCES app_user(id) ON DELETE SET NULL
+);
+
+-- ── Notification Channels ─────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS notification_channel (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    name VARCHAR(200) NOT NULL,
+    channel_type VARCHAR(50) NOT NULL,  -- 'email', 'webhook', 'halopsa'
+    config JSONB NOT NULL DEFAULT '{}',  -- {smtp_host, smtp_port, smtp_user, smtp_pass_encrypted, from_addr, to_addrs[]} for email; {url, headers, method} for webhook
+    is_enabled BOOLEAN NOT NULL DEFAULT true,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- ── Notification Log ──────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS notification_log (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    channel_id UUID REFERENCES notification_channel(id) ON DELETE SET NULL,
+    alert_event_id UUID REFERENCES alert_event(id) ON DELETE SET NULL,
+    notification_type VARCHAR(50) NOT NULL,  -- 'alert_fired', 'alert_resolved', 'backup_failed', 'backup_success', 'sbc_offline', 'trunk_down'
+    subject VARCHAR(500),
+    body TEXT,
+    recipient VARCHAR(500),
+    success BOOLEAN NOT NULL DEFAULT true,
+    error_message TEXT,
+    sent_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_notification_log_time ON notification_log (sent_at DESC);
+CREATE INDEX IF NOT EXISTS idx_notification_log_channel ON notification_log (channel_id);
+
+-- ── Seed: default system settings ─────────────────────────────────────────
+INSERT INTO system_setting (key, value, category, description) VALUES
+    ('branding.company_name', '"PBXMonitorX"', 'branding', 'Company name shown in header and login'),
+    ('branding.logo_url', '""', 'branding', 'URL or base64 data for custom logo'),
+    ('branding.primary_color', '"#C8965A"', 'branding', 'Primary accent color (hex)'),
+    ('branding.dark_mode', 'true', 'branding', 'Enable dark mode theme'),
+    ('branding.favicon_url', '""', 'branding', 'Custom favicon URL'),
+    ('backup.default_storage_path', '"/data/backups"', 'backup', 'Default local storage path for backups'),
+    ('backup.storage_type', '"local"', 'backup', 'Storage backend: local, s3, sftp'),
+    ('backup.s3_bucket', '""', 'backup', 'S3 bucket name for remote backup storage'),
+    ('backup.s3_region', '""', 'backup', 'S3 region'),
+    ('backup.s3_access_key', '""', 'backup', 'S3 access key'),
+    ('backup.s3_secret_key_encrypted', '""', 'backup', 'S3 secret key (encrypted)'),
+    ('backup.sftp_host', '""', 'backup', 'SFTP host for remote backup storage'),
+    ('backup.sftp_port', '22', 'backup', 'SFTP port'),
+    ('backup.sftp_user', '""', 'backup', 'SFTP username'),
+    ('backup.sftp_path', '""', 'backup', 'Remote path on SFTP server'),
+    ('backup.default_retain_count', '10', 'backup', 'Default number of backups to retain per PBX'),
+    ('backup.default_retain_days', '30', 'backup', 'Default days to retain backups'),
+    ('backup.default_encrypt_at_rest', 'false', 'backup', 'Encrypt backups at rest by default'),
+    ('notifications.enabled', 'false', 'notifications', 'Enable notification system'),
+    ('notifications.alert_on_trunk_down', 'true', 'notifications', 'Notify when trunk goes down'),
+    ('notifications.alert_on_sbc_offline', 'true', 'notifications', 'Notify when SBC goes offline'),
+    ('notifications.alert_on_backup_fail', 'true', 'notifications', 'Notify when backup fails'),
+    ('notifications.alert_on_backup_success', 'false', 'notifications', 'Notify on successful backup'),
+    ('notifications.alert_on_license_expiring', 'true', 'notifications', 'Notify when license is expiring'),
+    ('notifications.alert_on_pbx_unreachable', 'true', 'notifications', 'Notify when PBX is unreachable'),
+    ('integrations.halopsa_enabled', 'false', 'integrations', 'Enable HaloPSA integration'),
+    ('integrations.halopsa_api_url', '""', 'integrations', 'HaloPSA API base URL'),
+    ('integrations.halopsa_client_id', '""', 'integrations', 'HaloPSA OAuth client ID'),
+    ('integrations.halopsa_client_secret_encrypted', '""', 'integrations', 'HaloPSA OAuth client secret (encrypted)'),
+    ('integrations.halopsa_ticket_type_id', '0', 'integrations', 'Default ticket type ID in HaloPSA'),
+    ('integrations.halopsa_agent_id', '0', 'integrations', 'Default agent/team ID in HaloPSA')
+ON CONFLICT (key) DO NOTHING;
+
 -- ============================================================================
 -- VERIFICATION: List all tables
 -- ============================================================================

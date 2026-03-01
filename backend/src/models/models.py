@@ -290,3 +290,41 @@ class AuditLog(Base):
     success = Column(Boolean, nullable=False, default=True)
     error_message = Column(Text)
     created_at = Column(DateTime(timezone=True), server_default=text("now()"))
+
+
+class SystemSetting(Base):
+    __tablename__ = "system_setting"
+
+    key = Column(String(100), primary_key=True)
+    value = Column(JSONB, nullable=False, default={})
+    category = Column(String(50), nullable=False, default="general")
+    description = Column(Text)
+    updated_at = Column(DateTime(timezone=True), server_default=text("now()"))
+    updated_by = Column(UUID(as_uuid=True), ForeignKey("app_user.id", ondelete="SET NULL"))
+
+
+class NotificationChannel(Base):
+    __tablename__ = "notification_channel"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    name = Column(String(200), nullable=False)
+    channel_type = Column(String(50), nullable=False)
+    config = Column(JSONB, nullable=False, default={})
+    is_enabled = Column(Boolean, nullable=False, default=True)
+    created_at = Column(DateTime(timezone=True), server_default=text("now()"))
+    updated_at = Column(DateTime(timezone=True), server_default=text("now()"))
+
+
+class NotificationLog(Base):
+    __tablename__ = "notification_log"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    channel_id = Column(UUID(as_uuid=True), ForeignKey("notification_channel.id", ondelete="SET NULL"))
+    alert_event_id = Column(UUID(as_uuid=True), ForeignKey("alert_event.id", ondelete="SET NULL"))
+    notification_type = Column(String(50), nullable=False)
+    subject = Column(String(500))
+    body = Column(Text)
+    recipient = Column(String(500))
+    success = Column(Boolean, nullable=False, default=True)
+    error_message = Column(Text)
+    sent_at = Column(DateTime(timezone=True), server_default=text("now()"))
