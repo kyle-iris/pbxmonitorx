@@ -9,8 +9,33 @@ from sqlalchemy import (
     LargeBinary, String, Text, BigInteger, ARRAY, Index,
     text, UniqueConstraint, CheckConstraint,
 )
-from sqlalchemy.dialects.postgresql import UUID, JSONB, INET
+from sqlalchemy.dialects.postgresql import UUID, JSONB, INET, ENUM as PG_ENUM
 from sqlalchemy.orm import DeclarativeBase, relationship
+
+
+alert_state_enum = PG_ENUM(
+    'firing', 'acknowledged', 'resolved',
+    name='alert_state_t', create_type=False,
+)
+
+audit_action_enum = PG_ENUM(
+    'user_login', 'user_login_failed', 'user_logout',
+    'user_created', 'user_updated', 'user_deleted',
+    'pbx_created', 'pbx_updated', 'pbx_deleted', 'pbx_test_connection',
+    'backup_downloaded', 'backup_scheduled', 'backup_deleted',
+    'backup_retention_applied', 'backup_triggered',
+    'alert_rule_created', 'alert_rule_updated', 'alert_rule_deleted',
+    'alert_acknowledged', 'alert_resolved',
+    'config_changed', 'poll_completed', 'poll_failed',
+    'session_expired', 'capability_probe',
+    'sso_login', 'sso_login_failed', 'user_sso_login', 'user_sso_created',
+    'user_deactivated', 'user_password_reset',
+    'phone_numbers_synced', 'report_generated', 'backup_bulk_pull',
+    'settings_updated', 'notification_sent',
+    'notification_channel_created', 'notification_channel_updated',
+    'notification_channel_deleted',
+    name='audit_action_t', create_type=False,
+)
 
 
 class Base(DeclarativeBase):
@@ -262,7 +287,7 @@ class AlertEvent(Base):
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     rule_id = Column(UUID(as_uuid=True), ForeignKey("alert_rule.id", ondelete="CASCADE"), nullable=False)
     pbx_id = Column(UUID(as_uuid=True), ForeignKey("pbx_instance.id", ondelete="CASCADE"), nullable=False)
-    state = Column(String(20), nullable=False, default="firing")
+    state = Column(alert_state_enum, nullable=False, default="firing")
     severity = Column(String(20), nullable=False)
     title = Column(String(500), nullable=False)
     detail = Column(Text)
@@ -280,12 +305,12 @@ class AuditLog(Base):
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     user_id = Column(UUID(as_uuid=True), ForeignKey("app_user.id", ondelete="SET NULL"))
     username = Column(String(100))
-    action = Column(String(50), nullable=False)
+    action = Column(audit_action_enum, nullable=False)
     target_type = Column(String(50))
     target_id = Column(UUID(as_uuid=True))
     target_name = Column(String(300))
     detail = Column(JSONB, default={})
-    ip_address = Column(String(50))
+    ip_address = Column(INET)
     user_agent = Column(String(500))
     success = Column(Boolean, nullable=False, default=True)
     error_message = Column(Text)
