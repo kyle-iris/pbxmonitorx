@@ -5,15 +5,19 @@
 # Works on: Ubuntu 22.04 / 24.04 (Azure VM or DigitalOcean Droplet)
 # Run as:   sudo bash setup.sh
 #
+# Prerequisites:
+#   - Let's Encrypt certs already exist at /etc/letsencrypt/live/<domain>/
+#     (install certbot on the host and run: certbot certonly --standalone -d <domain>)
+#
 # What it does:
 #   1. Installs Docker + Docker Compose
 #   2. Creates pbxmonitorx user
 #   3. Clones your GitHub repo
 #   4. Generates all secrets (.env)
 #   5. Configures firewall (UFW)
-#   6. Obtains Let's Encrypt SSL certificate
+#   6. Verifies existing SSL certificates
 #   7. Starts all services
-#   8. Sets up auto-renewal + log rotation
+#   8. Sets up log rotation
 # ═══════════════════════════════════════════════════════════════════════════
 
 set -euo pipefail
@@ -21,16 +25,7 @@ set -euo pipefail
 # ── CONFIG (edit these or pass as env vars) ─────────────────────────────
 GITHUB_REPO="${GITHUB_REPO:-}"
 DOMAIN="${DOMAIN:-}"
-EMAIL="${EMAIL:-}"
 APP_DIR="/opt/pbxmonitorx"
-SKIP_SSL=false
-
-# Parse flags
-for arg in "$@"; do
-    case "$arg" in
-        --skip-ssl) SKIP_SSL=true ;;
-    esac
-done
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -52,16 +47,12 @@ fi
 if [[ -z "$DOMAIN" ]]; then
     read -rp "Domain name (e.g. monitor.example.com): " DOMAIN
 fi
-if [[ -z "$EMAIL" ]]; then
-    read -rp "Email for Let's Encrypt notifications: " EMAIL
-fi
 
 echo ""
 echo "═══════════════════════════════════════════════════════════"
 echo "  PBXMonitorX Setup"
 echo "  Repo:   $GITHUB_REPO"
 echo "  Domain: $DOMAIN"
-echo "  Email:  $EMAIL"
 echo "═══════════════════════════════════════════════════════════"
 echo ""
 
@@ -127,7 +118,6 @@ REDIS_PASSWORD=${REDIS_PASSWORD}
 MASTER_KEY=${MASTER_KEY}
 JWT_SECRET=${JWT_SECRET}
 DOMAIN=${DOMAIN}
-EMAIL=${EMAIL}
 EOF
 
     chmod 600 "$APP_DIR/.env"
@@ -147,7 +137,7 @@ ufw --force reset
 ufw default deny incoming
 ufw default allow outgoing
 ufw allow 22/tcp    comment 'SSH'
-ufw allow 80/tcp    comment 'HTTP (redirect + ACME)'
+ufw allow 80/tcp    comment 'HTTP (redirect to HTTPS)'
 ufw allow 443/tcp   comment 'HTTPS'
 ufw --force enable
 log "Firewall configured: SSH(22), HTTP(80), HTTPS(443)"
@@ -164,93 +154,19 @@ EOF
 systemctl enable fail2ban
 systemctl restart fail2ban
 
-# ── 9. SSL CERTIFICATE ─────────────────────────────────────────────────
+# ── 9. VERIFY SSL CERTIFICATES ────────────────────────────────────────
+CERT_PATH="/etc/letsencrypt/live/$DOMAIN"
 
-# Always generate a self-signed cert as a fallback so nginx can start
-CERT_DIR="$APP_DIR/deploy/nginx/certs"
-mkdir -p "$CERT_DIR"
-
-generate_self_signed() {
-    log "Generating self-signed certificate (fallback)..."
-    openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
-        -keyout "$CERT_DIR/privkey.pem" \
-        -out "$CERT_DIR/fullchain.pem" \
-        -subj "/CN=$DOMAIN" 2>/dev/null
-}
-
-inject_certs_into_volume() {
-    # Ensure the certbot-etc Docker volume has the certs so nginx can find them
-    # We use a temporary alpine container to copy the local certs into the volume
-    log "Injecting certificates into Docker volume..."
-    local COMPOSE_PROJECT
-    COMPOSE_PROJECT=$(docker compose -f "$APP_DIR/docker-compose.prod.yml" config --format json 2>/dev/null | grep -o '"name":"[^"]*"' | head -1 | cut -d'"' -f4 || echo "")
-    # Fallback: derive project name from directory
-    if [[ -z "$COMPOSE_PROJECT" ]]; then
-        COMPOSE_PROJECT=$(basename "$APP_DIR" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]//g')
-    fi
-    local VOLUME_NAME="${COMPOSE_PROJECT}_certbot-etc"
-    # Create the volume if it doesn't exist
-    docker volume create "$VOLUME_NAME" >/dev/null 2>&1 || true
-    docker run --rm \
-        -v "$CERT_DIR:/src:ro" \
-        -v "${VOLUME_NAME}:/etc/letsencrypt" \
-        alpine sh -c "mkdir -p /etc/letsencrypt/live/$DOMAIN && cp /src/fullchain.pem /src/privkey.pem /etc/letsencrypt/live/$DOMAIN/"
-    log "Certificates installed into volume $VOLUME_NAME"
-}
-
-if [[ "$SKIP_SSL" == true ]]; then
-    warn "Skipping Let's Encrypt (--skip-ssl flag set)"
-    generate_self_signed
-    inject_certs_into_volume
-    warn "Using self-signed certificate. Run this later to get a real cert:"
-    warn "  cd $APP_DIR && sudo bash deploy/setup-ssl.sh"
+if [[ -f "$CERT_PATH/fullchain.pem" && -f "$CERT_PATH/privkey.pem" ]]; then
+    log "SSL certificates found at $CERT_PATH"
 else
-    log "Attempting Let's Encrypt certificate for $DOMAIN..."
+    err "SSL certificates not found at $CERT_PATH
 
-    # Save the full SSL config and use a temp HTTP-only config for cert issuance
-    mkdir -p "$APP_DIR/deploy/nginx/conf.d.bak"
-    cp "$APP_DIR/deploy/nginx/conf.d/pbxmonitorx.conf" "$APP_DIR/deploy/nginx/conf.d.bak/"
+  Install certbot on the host and obtain certs before running this script:
+    sudo apt install certbot
+    sudo certbot certonly --standalone -d $DOMAIN
 
-    cat > "$APP_DIR/deploy/nginx/conf.d/pbxmonitorx.conf" <<EOF
-server {
-    listen 80;
-    server_name $DOMAIN;
-    location /.well-known/acme-challenge/ { root /var/www/certbot; }
-    location / { return 200 'PBXMonitorX setup in progress'; add_header Content-Type text/plain; }
-}
-EOF
-
-    cd "$APP_DIR"
-    docker compose -f docker-compose.prod.yml up -d nginx
-    sleep 3
-
-    # Run certbot with a 60-second timeout so it doesn't hang
-    CERT_OK=false
-    if timeout 60 docker compose -f docker-compose.prod.yml run --rm certbot \
-        certbot certonly --webroot -w /var/www/certbot \
-        --email "$EMAIL" --agree-tos --no-eff-email \
-        --non-interactive \
-        -d "$DOMAIN" 2>&1; then
-        CERT_OK=true
-        log "SSL certificate obtained from Let's Encrypt"
-    else
-        warn "Let's Encrypt failed (DNS not ready? Port 80 blocked?)"
-        warn "Falling back to self-signed certificate."
-        generate_self_signed
-        inject_certs_into_volume
-    fi
-
-    # Stop the temp nginx
-    docker compose -f docker-compose.prod.yml down nginx 2>/dev/null || true
-
-    # Restore full SSL config
-    cp "$APP_DIR/deploy/nginx/conf.d.bak/pbxmonitorx.conf" "$APP_DIR/deploy/nginx/conf.d/pbxmonitorx.conf"
-    sed -i "s/REPLACE_DOMAIN/$DOMAIN/g" "$APP_DIR/deploy/nginx/conf.d/pbxmonitorx.conf"
-
-    if [[ "$CERT_OK" == false ]]; then
-        warn "To get a real certificate later, run:"
-        warn "  cd $APP_DIR && sudo bash deploy/setup-ssl.sh"
-    fi
+  Then re-run this setup script."
 fi
 
 # ── 10. CREATE BACKUP DIRECTORY ─────────────────────────────────────────
