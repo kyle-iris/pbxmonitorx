@@ -16,7 +16,7 @@
 #   4. Generates all secrets (.env)
 #   5. Configures firewall (UFW)
 #   6. Verifies existing SSL certificates
-#   7. Starts all services
+#   7. Starts all services (nginx auto-templates domain from .env)
 #   8. Sets up log rotation
 # ═══════════════════════════════════════════════════════════════════════════
 
@@ -127,11 +127,7 @@ else
     warn ".env already exists — keeping existing secrets"
 fi
 
-# ── 6. CONFIGURE DOMAIN IN NGINX ───────────────────────────────────────
-log "Configuring nginx for $DOMAIN..."
-sed -i "s/REPLACE_DOMAIN/$DOMAIN/g" "$APP_DIR/deploy/nginx/conf.d/pbxmonitorx.conf"
-
-# ── 7. FIREWALL ────────────────────────────────────────────────────────
+# ── 6. FIREWALL ────────────────────────────────────────────────────────
 log "Configuring firewall..."
 ufw --force reset
 ufw default deny incoming
@@ -142,7 +138,7 @@ ufw allow 443/tcp   comment 'HTTPS'
 ufw --force enable
 log "Firewall configured: SSH(22), HTTP(80), HTTPS(443)"
 
-# ── 8. FAIL2BAN ────────────────────────────────────────────────────────
+# ── 7. FAIL2BAN ────────────────────────────────────────────────────────
 log "Configuring fail2ban..."
 cat > /etc/fail2ban/jail.local <<'EOF'
 [sshd]
@@ -154,7 +150,7 @@ EOF
 systemctl enable fail2ban
 systemctl restart fail2ban
 
-# ── 9. VERIFY SSL CERTIFICATES ────────────────────────────────────────
+# ── 8. VERIFY SSL CERTIFICATES ────────────────────────────────────────
 CERT_PATH="/etc/letsencrypt/live/$DOMAIN"
 
 if [[ -f "$CERT_PATH/fullchain.pem" && -f "$CERT_PATH/privkey.pem" ]]; then
@@ -169,11 +165,11 @@ else
   Then re-run this setup script."
 fi
 
-# ── 10. CREATE BACKUP DIRECTORY ─────────────────────────────────────────
+# ── 9. CREATE BACKUP DIRECTORY ─────────────────────────────────────────
 mkdir -p /data/backups
 chown pbxmonitorx:pbxmonitorx /data/backups
 
-# ── 11. START ALL SERVICES ──────────────────────────────────────────────
+# ── 10. START ALL SERVICES ──────────────────────────────────────────────
 log "Building and starting all services..."
 cd "$APP_DIR"
 docker compose -f docker-compose.prod.yml down
@@ -187,7 +183,7 @@ sleep 10
 # Verify
 docker compose -f docker-compose.prod.yml ps
 
-# ── 12. LOG ROTATION ───────────────────────────────────────────────────
+# ── 11. LOG ROTATION ───────────────────────────────────────────────────
 cat > /etc/logrotate.d/pbxmonitorx <<EOF
 /var/log/pbxmonitorx/*.log {
     daily
@@ -199,7 +195,7 @@ cat > /etc/logrotate.d/pbxmonitorx <<EOF
 }
 EOF
 
-# ── 13. AUTO-UPDATE CRON ───────────────────────────────────────────────
+# ── 12. AUTO-UPDATE CRON ───────────────────────────────────────────────
 cat > /etc/cron.d/pbxmonitorx-update <<'EOF'
 # Check for updates daily at 4am
 0 4 * * * root cd /opt/pbxmonitorx && git pull && docker compose -f docker-compose.prod.yml build --quiet && docker compose -f docker-compose.prod.yml up -d --remove-orphans
