@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useRef, useCallback, Fragment } from "react";
 
 /* ═══════════════════════════════════════════════════════════════════════════
    THEME & UTILITIES
@@ -628,9 +628,9 @@ function PhoneNumbersPage(){
       const[nums,sum,inst]=await Promise.all([
         api.get("/phone-numbers"),
         api.get("/phone-numbers/summary").catch(()=>({})),
-        api.get("/pbx/instances"),
+        api.get("/pbx/instances?per_page=200"),
       ]);
-      setNumbers(nums||[]);setSummary(sum||{});setInstances(inst||[]);setError("");
+      setNumbers(nums||[]);setSummary(sum||{});setInstances(inst?.instances||[]);setError("");
     }catch{setError("Failed to load phone numbers");}
     finally{setLoading(false);}
   },[]);
@@ -675,7 +675,7 @@ function PhoneNumbersPage(){
       <div><h1 style={{fontSize:22,fontWeight:700,color:C.txB,margin:0}}>Phone Numbers</h1><p style={{fontSize:13,color:C.txM,margin:"3px 0 0"}}>{summary.total||numbers.length} numbers across {instances.length} systems</p></div>
       <div style={{display:"flex",gap:8}}>
         <Btn small variant="ghost" onClick={loadReport}>Report</Btn>
-        <Btn small variant="default" onClick={()=>window.open("/api/phone-numbers/export"+(filters.pbx?"?pbx_id="+filters.pbx:""),"_blank")}>Export CSV</Btn>
+        <Btn small variant="default" onClick={async()=>{try{const r=await fetch(API+"/phone-numbers/export"+(filters.pbx?"?pbx_id="+filters.pbx:""),{headers:headers()});if(!r.ok)throw new Error();const blob=await r.blob();const a=document.createElement("a");a.href=URL.createObjectURL(blob);a.download="phone_numbers.csv";a.click();URL.revokeObjectURL(a.href);}catch{alert("Export failed");}}}>Export CSV</Btn>
         <Btn small variant="default" onClick={syncAll} loading={syncing==="all"}><Sv d={iRf} s={14}/> Sync All</Btn>
       </div>
     </div>
@@ -741,12 +741,13 @@ function BackupsPage(){
     try{
       const[bk,inst]=await Promise.all([
         api.get("/backups?limit=200"),
-        api.get("/pbx/instances"),
+        api.get("/pbx/instances?per_page=200"),
       ]);
-      setBackups(bk||[]);setInstances(inst||[]);
+      const instList=inst?.instances||[];
+      setBackups(bk||[]);setInstances(instList);
       // Load schedules for each PBX
       const sMap={};
-      await Promise.all((inst||[]).map(async(i)=>{
+      await Promise.all((instList).map(async(i)=>{
         try{const s=await api.get("/backups/"+i.id+"/schedule");sMap[i.id]=s;}catch{}
       }));
       setSchedules(sMap);
@@ -885,8 +886,8 @@ function AlertsPage(){
       let url="/alerts?limit=200";
       if(stateFilter)url+="&state="+stateFilter;
       if(pbxFilter)url+="&pbx_id="+pbxFilter;
-      const[al,inst]=await Promise.all([api.get(url),api.get("/pbx/instances")]);
-      setAlerts(al||[]);setInstances(inst||[]);setError("");
+      const[al,inst]=await Promise.all([api.get(url),api.get("/pbx/instances?per_page=200")]);
+      setAlerts(al||[]);setInstances(inst?.instances||[]);setError("");
     }catch{setError("Failed to load alerts");}
     finally{setLoading(false);}
   },[stateFilter,pbxFilter]);
@@ -958,11 +959,16 @@ function AuditPage(){
 
   useEffect(()=>{load();},[load]);
 
-  const exportCsv=()=>{
-    let url="/api/audit/export?";
+  const exportCsv=async()=>{
+    let url="/audit/export?";
     if(filters.action)url+="action="+filters.action+"&";
     if(filters.target_type)url+="target_type="+filters.target_type+"&";
-    window.open(url,"_blank");
+    try{
+      const r=await fetch(API+url,{headers:headers()});
+      if(!r.ok)throw new Error();
+      const blob=await r.blob();
+      const a=document.createElement("a");a.href=URL.createObjectURL(blob);a.download="audit_export.csv";a.click();URL.revokeObjectURL(a.href);
+    }catch{alert("Export failed");}
   };
 
   const totalPages=Math.ceil(total/limit);
@@ -1124,7 +1130,7 @@ function EditUserModal({user,onClose,onSave}){
 
 
 /* ═══════════════════════════════════════════════════════════════════════════
-   SETTINGS PAGE
+   SBC STATUS PAGE
    ═══════════════════════════════════════════════════════════════════════════ */
 function SBCPage(){
   const[sbcs,setSbcs]=useState([]);
@@ -1486,8 +1492,8 @@ function EventLogPage(){
           <thead><tr style={{borderBottom:"1px solid "+C.border}}>
             {["Time","Level","Source","PBX","Event","Message","ms"].map(h=><th key={h} style={{padding:"8px 10px",textAlign:"left",fontSize:10,fontWeight:600,color:C.txM,textTransform:"uppercase",letterSpacing:".05em"}}>{h}</th>)}
           </tr></thead>
-          <tbody>{events.events.map(e=><>
-            <tr key={e.id} onClick={()=>setExpanded(expanded===e.id?null:e.id)} style={{borderBottom:"1px solid "+C.border,cursor:"pointer",background:expanded===e.id?C.bg2:"transparent",transition:"background .12s"}}>
+          <tbody>{events.events.map(e=><Fragment key={e.id}>
+            <tr onClick={()=>setExpanded(expanded===e.id?null:e.id)} style={{borderBottom:"1px solid "+C.border,cursor:"pointer",background:expanded===e.id?C.bg2:"transparent",transition:"background .12s"}}>
               <td style={{padding:"6px 10px",fontFamily:M,fontSize:11,color:C.txM,whiteSpace:"nowrap"}}>{fTime(e.timestamp)}</td>
               <td style={{padding:"6px 10px"}}><span style={{display:"inline-block",padding:"1px 7px",borderRadius:99,fontSize:10,fontWeight:600,color:levelColors[e.level]||C.txM,background:levelBgs[e.level]||"transparent"}}>{e.level}</span></td>
               <td style={{padding:"6px 10px",fontFamily:M,fontSize:11,color:C.ac}}>{e.source}</td>
@@ -1496,14 +1502,14 @@ function EventLogPage(){
               <td style={{padding:"6px 10px",fontSize:11,color:C.tx,maxWidth:400,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{e.message}</td>
               <td style={{padding:"6px 10px",fontFamily:M,fontSize:11,color:C.txD,textAlign:"right"}}>{e.duration_ms!=null?e.duration_ms:"\u2014"}</td>
             </tr>
-            {expanded===e.id&&<tr key={e.id+"-detail"}><td colSpan={7} style={{padding:"10px 14px",background:C.bg2,borderBottom:"1px solid "+C.border}}>
+            {expanded===e.id&&<tr><td colSpan={7} style={{padding:"10px 14px",background:C.bg2,borderBottom:"1px solid "+C.border}}>
               <div style={{fontSize:11,fontFamily:M,color:C.tx}}>
                 <div style={{marginBottom:6}}><strong style={{color:C.txB}}>Full Message:</strong> {e.message}</div>
                 {e.detail&&Object.keys(e.detail).length>0&&<div style={{marginBottom:6}}><strong style={{color:C.txB}}>Detail:</strong><pre style={{margin:"4px 0",padding:8,background:C.bg0,borderRadius:4,fontSize:10,color:C.txD,overflow:"auto",maxHeight:200}}>{JSON.stringify(e.detail,null,2)}</pre></div>}
                 {e.error_trace&&<div><strong style={{color:C.r}}>Stack Trace:</strong><pre style={{margin:"4px 0",padding:8,background:C.bg0,borderRadius:4,fontSize:10,color:C.r,overflow:"auto",maxHeight:300,whiteSpace:"pre-wrap"}}>{e.error_trace}</pre></div>}
               </div>
             </td></tr>}
-          </>)}</tbody>
+          </Fragment>)}</tbody>
         </table>
       </div>
       {events.pages>1&&<div style={{display:"flex",justifyContent:"center",gap:6,marginTop:14}}>
@@ -1524,6 +1530,7 @@ export default function App(){
   const[page,setPage]=useState("dashboard");
   const[detailId,setDetailId]=useState(null);
   const[showAdd,setShowAdd]=useState(false);
+  const[refreshKey,setRefreshKey]=useState(0);
   const[alertCount,setAlertCount]=useState(0);
 
   // Listen for auth-logout events from 401 handler
@@ -1537,7 +1544,7 @@ export default function App(){
   useEffect(()=>{
     if(!authed)return;
     const loadAlertCount=()=>{
-      api.get("/alerts?state=firing&limit=1").then(data=>{
+      api.get("/alerts?state=firing").then(data=>{
         setAlertCount(Array.isArray(data)?data.length:0);
       }).catch(()=>{});
     };
@@ -1579,7 +1586,7 @@ export default function App(){
     if(detailId)return<DetailPage instanceId={detailId} onBack={()=>setDetailId(null)}/>;
     switch(page){
       case"dashboard":return<DashboardPage onNavigate={navigate}/>;
-      case"systems":return<SystemsPage onSelect={id=>setDetailId(id)} onAdd={()=>setShowAdd(true)}/>;
+      case"systems":return<SystemsPage key={refreshKey} onSelect={id=>setDetailId(id)} onAdd={()=>setShowAdd(true)}/>;
       case"sbcs":return<SBCPage/>;
       case"phones":return<PhoneNumbersPage/>;
       case"backups":return<BackupsPage/>;
@@ -1609,7 +1616,7 @@ export default function App(){
       <div style={{padding:"10px 18px",borderTop:"1px solid "+C.border,fontSize:10,color:C.txM,fontFamily:M}}>v0.1.0 | <span style={{color:C.g}}>●</span> Connected</div>
     </nav>
     <main style={{flex:1,overflow:"auto",padding:"24px 32px"}}>{renderPage()}</main>
-    {showAdd&&<AddInstanceModal onClose={()=>setShowAdd(false)} onSave={()=>{setShowAdd(false);if(page==="systems")setPage("systems");}}/>}
+    {showAdd&&<AddInstanceModal onClose={()=>setShowAdd(false)} onSave={()=>{setShowAdd(false);setRefreshKey(k=>k+1);}}/>}
     <style>{`
       @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700;800&display=swap');
       @keyframes spin{to{transform:rotate(360deg)}}
