@@ -14,6 +14,7 @@ from src.api.backup_routes import router as backup_router
 from src.api.user_routes import router as user_router
 from src.api.sso_routes import router as sso_router
 from src.api.settings_routes import router as settings_router
+from src.api.event_log_routes import router as event_log_router
 
 logging.basicConfig(
     level=logging.INFO,
@@ -59,3 +60,4 @@ app.include_router(backup_router, prefix="/api")
 app.include_router(user_router, prefix="/api")
 app.include_router(sso_router, prefix="/api")
 app.include_router(settings_router, prefix="/api")
+app.include_router(event_log_router, prefix="/api")

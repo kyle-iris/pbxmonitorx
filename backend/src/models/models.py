@@ -328,3 +328,20 @@ class NotificationLog(Base):
     success = Column(Boolean, nullable=False, default=True)
     error_message = Column(Text)
     sent_at = Column(DateTime(timezone=True), server_default=text("now()"))
+
+
+class EventLog(Base):
+    __tablename__ = "event_log"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    timestamp = Column(DateTime(timezone=True), server_default=text("now()"), nullable=False)
+    level = Column(String(20), nullable=False, default="info")
+    source = Column(String(100), nullable=False)
+    pbx_id = Column(UUID(as_uuid=True), ForeignKey("pbx_instance.id", ondelete="SET NULL"))
+    pbx_name = Column(String(200))
+    event_type = Column(String(100), nullable=False)
+    message = Column(Text, nullable=False)
+    detail = Column(JSONB, default={})
+    duration_ms = Column(Integer)
+    error_trace = Column(Text)
+    created_at = Column(DateTime(timezone=True), server_default=text("now()"))

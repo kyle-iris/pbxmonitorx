@@ -22,6 +22,7 @@ from src.models.models import (
     AlertRule, AlertEvent, TrunkState, SbcState,
     LicenseState, BackupRecord, PbxInstance, AuditLog,
 )
+from src.services.event_log_service import log_event
 
 logger = logging.getLogger("pbxmonitorx.alerts")
 
@@ -271,6 +272,10 @@ async def _fire_if_new(
     except Exception as e:
         logger.warning(f"Notification dispatch failed: {e}")
 
+    await log_event(db, "alert", "alert_fired", f"ALERT FIRED [{sev}]: {title}",
+                    level="warning" if sev != "critical" else "critical",
+                    pbx_id=pbx.id, pbx_name=pbx.name,
+                    detail={"severity": sev, "title": title, "fingerprint": fingerprint})
     logger.warning(f"ALERT FIRED [{sev}]: {title}")
     return {"action": "fired", "severity": sev, "title": title, "pbx": pbx.name}
 
@@ -304,6 +309,9 @@ async def _resolve_if_active(db: AsyncSession, fingerprint: str) -> Optional[dic
     except Exception as e:
         logger.warning(f"Resolution notification failed: {e}")
 
+    await log_event(db, "alert", "alert_resolved", f"ALERT RESOLVED: {event.title}",
+                    pbx_id=event.pbx_id,
+                    detail={"title": event.title, "fingerprint": fingerprint})
     logger.info(f"ALERT RESOLVED: {event.title}")
     return {"action": "resolved", "title": event.title}
 

@@ -3,18 +3,18 @@
 This module encapsulates ALL communication with a 3CX v20 instance.
 Nothing outside this adapter knows how data is fetched from 3CX.
 
+API Strategy:
+    - Primary: 3CX v20 XAPI (OData v4) at /xapi/v1/ — the official API
+    - Fallback: webclient internal API at /webclient/api/
+    - Last resort: HTML scraping (fragile, labeled as such)
+    - Authentication: webclient login or OAuth2 client credentials (Enterprise)
+
 Security:
     - All connections over HTTPS (TLS verification configurable per-PBX)
     - Session cookies held in-memory only, never persisted
     - Passwords passed in, never stored in adapter state
     - Connection timeout enforced on all requests
     - Rate limiting via caller (adapter doesn't auto-poll)
-
-Fragility:
-    - 3CX v20 has NO official public API — we replicate management console calls
-    - Endpoints discovered via probing; may change between minor versions
-    - All parsing is behind try/except with degraded fallbacks
-    - HTML scraping is last resort, clearly labeled "fragile"
 
 Usage:
     adapter = ThreeCXv20Adapter("https://pbx.example.com", verify_tls=True)
@@ -138,52 +138,41 @@ class PhoneNumberData:
 # The adapter tries each and remembers which one worked.
 
 LOGIN_ENDPOINTS = [
-    # 3CX v20 webclient API — most common
+    # 3CX v20 webclient/management console login — primary
     ("POST", "/webclient/api/Login/GetAccessToken", "webclient_token"),
-    # 3CX v20 management console API
-    ("POST", "/api/login", "api_login"),
-    # Older/alternate
-    ("POST", "/api/Login/GetAccessToken", "alt_token"),
+    # 3CX v20 OAuth2 client credentials (Enterprise editions)
+    ("POST", "/connect/token", "oauth2_client_credentials"),
 ]
 
 FEATURE_ENDPOINTS = {
     "trunks": [
         ("GET", "/xapi/v1/Trunks",                          "xapi_trunks"),
-        ("GET", "/api/TrunkList",                            "api_trunk_list"),
         ("GET", "/webclient/api/Trunk/Get",                  "webclient_trunks"),
-        ("GET", "/api/SystemStatus",                         "system_status"),
     ],
     "sbcs": [
         ("GET", "/xapi/v1/Sbcs",                             "xapi_sbcs"),
-        ("GET", "/api/SbcList",                              "api_sbc_list"),
         ("GET", "/webclient/api/Sbc/Get",                    "webclient_sbcs"),
     ],
     "license": [
-        ("GET", "/xapi/v1/License",                          "xapi_license"),
-        ("GET", "/api/LicenseInfo",                          "api_license"),
+        ("GET", "/xapi/v1/LicenseInfo",                      "xapi_license_info"),
+        ("GET", "/xapi/v1/LicenseStatus",                    "xapi_license_status"),
         ("GET", "/webclient/api/License/Get",                "webclient_license"),
-        ("GET", "/api/SystemStatus",                         "system_status_lic"),
     ],
     "backup_list": [
         ("GET", "/xapi/v1/Backups",                          "xapi_backups"),
-        ("GET", "/api/BackupList",                           "api_backup_list"),
         ("GET", "/webclient/api/BackupAndRestore/Get",       "webclient_backups"),
     ],
     "backup_download": [
-        ("GET", "/api/BackupAndRestore/download/{id}",       "api_download"),
         ("GET", "/xapi/v1/Backups({id})/$value",             "xapi_download"),
         ("GET", "/webclient/api/BackupAndRestore/Download",  "webclient_download"),
     ],
     "phone_numbers": [
         ("GET", "/xapi/v1/Trunks({trunk_id})/PhoneNumbers",  "xapi_trunk_phones"),
-        ("GET", "/api/InboundRuleList",                       "api_inbound_rules"),
-        ("GET", "/webclient/api/InboundRule/Get",             "webclient_inbound"),
         ("GET", "/xapi/v1/Dids",                              "xapi_dids"),
-        ("GET", "/api/DidList",                               "api_did_list"),
+        ("GET", "/webclient/api/InboundRule/Get",             "webclient_inbound"),
     ],
     "version": [
         ("GET", "/xapi/v1/SystemStatus",                     "xapi_status"),
-        ("GET", "/api/SystemStatus",                         "api_status"),
     ],
 }
 
@@ -274,9 +263,18 @@ class ThreeCXv20Adapter:
         for method, path, label in LOGIN_ENDPOINTS:
             t0 = time.monotonic()
             try:
-                # 3CX v20 accepts JSON with Username/Password
-                payload = {"Username": username, "Password": password}
-                resp = await client.request(method, path, json=payload)
+                if label == "oauth2_client_credentials":
+                    # OAuth2 client credentials flow (Enterprise editions)
+                    payload = None
+                    resp = await client.request(method, path, data={
+                        "grant_type": "client_credentials",
+                        "client_id": username,
+                        "client_secret": password,
+                    }, headers={"Content-Type": "application/x-www-form-urlencoded"})
+                else:
+                    # 3CX v20 webclient login — requires SecurityCode field
+                    payload = {"Username": username, "Password": password, "SecurityCode": ""}
+                    resp = await client.request(method, path, json=payload)
                 ms = int((time.monotonic() - t0) * 1000)
 
                 if resp.status_code == 200:
@@ -485,10 +483,9 @@ class ThreeCXv20Adapter:
         client = await self._ensure_client()
 
         trigger_endpoints = [
-            ("POST", "/xapi/v1/Backups/Pbx.StartBackup()", "xapi_trigger"),
-            ("POST", "/api/BackupAndRestore/start", "api_trigger"),
+            # 3CX v20 documented OData action for triggering backup
+            ("POST", "/xapi/v1/Backups/Pbx.Backup", "xapi_trigger"),
             ("POST", "/webclient/api/BackupAndRestore/Post", "webclient_trigger"),
-            ("POST", "/api/backup/start", "api_start"),
         ]
 
         for method, path, label in trigger_endpoints:
@@ -758,7 +755,7 @@ class ThreeCXv20Adapter:
                         return self._try_json(resp)
                     elif "html" in ct:
                         return self._scrape_html(resp.text, feature)
-                elif resp.status_code in (401, 403):
+                if resp.status_code in (401, 403):
                     self._authenticated = False
                     logger.warning(f"Session expired fetching {feature}")
                     return None
@@ -810,17 +807,36 @@ class ThreeCXv20Adapter:
 
     @staticmethod
     def _extract_token(data: dict) -> Optional[str]:
-        """Extract bearer token from various 3CX response formats."""
+        """Extract bearer token from various 3CX response formats.
+
+        3CX v20 webclient login returns:
+            {"Status": "AuthSuccess", "Token": {"access_token": "...", ...}}
+        OAuth2 client_credentials returns:
+            {"access_token": "...", "token_type": "Bearer", ...}
+        """
         if isinstance(data, str):
             return data if len(data) > 20 else None
 
-        for key in ("Token", "token", "access_token", "AccessToken"):
-            val = data.get(key)
-            if val:
-                if isinstance(val, str) and len(val) > 10:
-                    return val
-                if isinstance(val, dict):
-                    return val.get("token") or val.get("value")
+        # Check top-level access_token first (OAuth2 response)
+        if isinstance(data.get("access_token"), str) and len(data["access_token"]) > 10:
+            return data["access_token"]
+
+        # Check Token field (webclient login response)
+        token_val = data.get("Token") or data.get("token")
+        if token_val:
+            if isinstance(token_val, dict):
+                # 3CX v20: {"Token": {"access_token": "jwt...", "token_type": "Bearer"}}
+                inner = token_val.get("access_token") or token_val.get("token") or token_val.get("value")
+                if isinstance(inner, str) and len(inner) > 10:
+                    return inner
+            elif isinstance(token_val, str) and len(token_val) > 10:
+                return token_val
+
+        # Fallback: AccessToken key
+        at = data.get("AccessToken")
+        if isinstance(at, str) and len(at) > 10:
+            return at
+
         return None
 
     def _parse_trunk(self, item: dict) -> TrunkData:

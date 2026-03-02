@@ -491,6 +491,30 @@ INSERT INTO system_setting (key, value, category, description) VALUES
     ('integrations.halopsa_agent_id', '0', 'integrations', 'Default agent/team ID in HaloPSA')
 ON CONFLICT (key) DO NOTHING;
 
+-- ── Event Log (tool-level operational logging for troubleshooting) ──────────
+CREATE TABLE IF NOT EXISTS event_log (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    timestamp TIMESTAMPTZ NOT NULL DEFAULT now(),
+    level VARCHAR(20) NOT NULL DEFAULT 'info',      -- debug, info, warning, error, critical
+    source VARCHAR(100) NOT NULL,                    -- polling, backup, alert, adapter, notification, auth, system
+    pbx_id UUID REFERENCES pbx_instance(id) ON DELETE SET NULL,
+    pbx_name VARCHAR(200),                           -- denormalized for when PBX is deleted
+    event_type VARCHAR(100) NOT NULL,                -- poll_started, poll_completed, poll_failed, login_attempt, etc.
+    message TEXT NOT NULL,
+    detail JSONB DEFAULT '{}',                       -- structured data (error traces, durations, etc.)
+    duration_ms INT,                                 -- how long the operation took
+    error_trace TEXT,                                -- full stack trace for errors
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_event_log_time ON event_log (timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_event_log_level ON event_log (level, timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_event_log_source ON event_log (source, timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_event_log_pbx ON event_log (pbx_id, timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_event_log_type ON event_log (event_type);
+
+-- Auto-cleanup: event_log should be pruned periodically (implement via retention task)
+-- Default retention: 7 days for debug, 30 days for info, 90 days for warning+
+
 -- ============================================================================
 -- VERIFICATION: List all tables
 -- ============================================================================

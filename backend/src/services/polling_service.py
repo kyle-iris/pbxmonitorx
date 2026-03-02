@@ -30,6 +30,7 @@ from src.models.models import (
     PbxInstance, PbxCredential, TrunkState, SbcState,
     LicenseState, PollResult, AuditLog,
 )
+from src.services.event_log_service import log_event, log_error
 
 logger = logging.getLogger("pbxmonitorx.polling")
 
@@ -46,6 +47,9 @@ async def poll_single_instance(db: AsyncSession, pbx_id: UUID) -> dict:
     pbx = result.scalar_one_or_none()
     if not pbx or not pbx.is_enabled:
         return {"success": False, "error": "PBX not found or disabled"}
+
+    await log_event(db, "polling", "poll_started", f"Starting poll for {pbx.name}",
+                    level="debug", pbx_id=pbx.id, pbx_name=pbx.name)
 
     cred_result = await db.execute(select(PbxCredential).where(PbxCredential.pbx_id == pbx_id))
     cred = cred_result.scalar_one_or_none()
@@ -122,6 +126,11 @@ async def poll_single_instance(db: AsyncSession, pbx_id: UUID) -> dict:
 
         await db.commit()
 
+        await log_event(db, "polling", "poll_completed",
+                        f"Poll {pbx.name}: OK in {duration_ms}ms — {diff_summary}",
+                        pbx_id=pbx.id, pbx_name=pbx.name, duration_ms=duration_ms,
+                        detail={"trunks": len(trunks), "sbcs": len(sbcs), "changes": diff_parts})
+
         logger.info(f"Poll {pbx.name}: OK in {duration_ms}ms — {diff_summary}")
         return {
             "success": True,
@@ -134,6 +143,9 @@ async def poll_single_instance(db: AsyncSession, pbx_id: UUID) -> dict:
 
     except Exception as e:
         logger.exception(f"Poll failed for {pbx.name}")
+        await log_error(db, "polling", "poll_failed", f"Poll failed for {pbx.name}: {e}",
+                        error=e, pbx_id=pbx.id, pbx_name=pbx.name,
+                        duration_ms=int((time.monotonic() - t0) * 1000))
         await _record_failure(db, pbx, str(e), int((time.monotonic() - t0) * 1000))
         return {"success": False, "error": str(e)}
 

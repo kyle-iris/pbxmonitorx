@@ -351,34 +351,19 @@ function EditInstanceModal({inst,onClose,onSave}){
    DASHBOARD PAGE
    ═══════════════════════════════════════════════════════════════════════════ */
 function DashboardPage({onNavigate}){
-  const[instances,setInstances]=useState([]);
-  const[statuses,setStatuses]=useState({});
+  const[summary,setSummary]=useState(null);
   const[alerts,setAlerts]=useState([]);
-  const[backups,setBackups]=useState([]);
-  const[phoneCount,setPhoneCount]=useState(0);
   const[loading,setLoading]=useState(true);
   const[error,setError]=useState("");
 
   const load=useCallback(async()=>{
     try{
-      const[inst,al,bk]=await Promise.all([
-        api.get("/pbx/instances"),
-        api.get("/alerts?state=firing&limit=5"),
-        api.get("/backups?limit=50"),
+      const[sm,al]=await Promise.all([
+        api.get("/pbx/dashboard-summary"),
+        api.get("/alerts?state=firing&limit=10"),
       ]);
-      setInstances(inst||[]);
-      setAlerts(al||[]);
-      setBackups(bk||[]);
-      // Load status for each instance
-      const sMap={};
-      await Promise.all((inst||[]).map(async(i)=>{
-        try{const s=await api.get("/pbx/instances/"+i.id+"/status");sMap[i.id]=s;}catch{}
-      }));
-      setStatuses(sMap);
-      // Phone number count
-      try{const pn=await api.get("/phone-numbers/summary");setPhoneCount(pn.total||0);}catch{setPhoneCount(0);}
-      setError("");
-    }catch(e){setError("Failed to load dashboard data");}
+      setSummary(sm);setAlerts(al||[]);setError("");
+    }catch{setError("Failed to load dashboard data");}
     finally{setLoading(false);}
   },[]);
 
@@ -386,86 +371,54 @@ function DashboardPage({onNavigate}){
 
   if(loading)return<PageLoader/>;
   if(error)return<ErrorMsg msg={error} onRetry={load}/>;
-
+  const s=summary||{pbx:{},trunks:{},sbcs:{},alerts:{},backups:{},problem_pbxes:[]};
   const firingAlerts=(alerts||[]).filter(a=>a.state==="firing");
-  const totalTrunks=Object.values(statuses).reduce((a,s)=>a+(s.trunks?.length||0),0);
-  const healthySystems=instances.filter(i=>{const s=statuses[i.id];return s&&s.overall_health==="healthy"}).length;
-  const backedUpSystems=new Set((backups||[]).filter(b=>{
-    if(!b.downloaded_at)return false;
-    const age=(Date.now()-new Date(b.downloaded_at).getTime())/3600000;
-    return age<24;
-  }).map(b=>b.pbx_id)).size;
 
   return<div>
     <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:22}}>
-      <div><h1 style={{fontSize:22,fontWeight:700,color:C.txB,margin:0}}>Dashboard</h1><p style={{fontSize:13,color:C.txM,margin:"3px 0 0"}}>{instances.length} system{instances.length!==1?"s":""} monitored</p></div>
+      <div><h1 style={{fontSize:22,fontWeight:700,color:C.txB,margin:0}}>Dashboard</h1><p style={{fontSize:13,color:C.txM,margin:"3px 0 0"}}>{s.pbx.total||0} system{s.pbx.total!==1?"s":""} monitored</p></div>
       <Btn variant="ghost" small onClick={load}><Sv d={iRf} s={14}/> Refresh</Btn>
     </div>
 
     {/* Top Stats */}
-    <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:10,marginBottom:22}}>
-      <Card style={{padding:14,display:"flex",justifyContent:"center"}}><Stat l="PBX Systems" v={instances.length} c={healthySystems===instances.length?C.g:C.y}/></Card>
-      <Card style={{padding:14,display:"flex",justifyContent:"center"}}><Stat l="Active Alerts" v={firingAlerts.length} c={firingAlerts.length>0?C.r:C.g}/></Card>
-      <Card style={{padding:14,display:"flex",justifyContent:"center"}}><Stat l="Backup Health" v={`${backedUpSystems}/${instances.length}`} c={backedUpSystems>=instances.length?C.g:C.y}/></Card>
-      <Card style={{padding:14,display:"flex",justifyContent:"center"}}><Stat l="Phone Numbers" v={phoneCount} c={C.b}/></Card>
+    <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(180px,1fr))",gap:10,marginBottom:22}}>
+      <Card style={{padding:14,display:"flex",justifyContent:"center"}}><Stat l="PBX Systems" v={`${s.pbx.enabled||0}/${s.pbx.total||0}`} c={s.pbx.errors>0?C.y:C.g}/></Card>
+      <Card style={{padding:14,display:"flex",justifyContent:"center"}}><Stat l="Trunks" v={`${s.trunks.registered||0}/${s.trunks.total||0}`} c={s.trunks.down>0?C.r:C.g}/></Card>
+      <Card style={{padding:14,display:"flex",justifyContent:"center"}}><Stat l="SBCs" v={`${s.sbcs.online||0}/${s.sbcs.total||0}`} c={s.sbcs.offline>0?C.r:C.g}/></Card>
+      <Card style={{padding:14,display:"flex",justifyContent:"center"}}><Stat l="Active Alerts" v={s.alerts.firing||0} c={(s.alerts.firing||0)>0?C.r:C.g}/></Card>
+      <Card style={{padding:14,display:"flex",justifyContent:"center"}}><Stat l="Backups" v={s.backups.total||0} c={C.b}/></Card>
+      <Card style={{padding:14,display:"flex",justifyContent:"center"}}><Stat l="Backup Size" v={fBytes(s.backups.total_bytes)} c={C.txD}/></Card>
     </div>
 
-    {/* System Status Cards */}
-    {instances.length>0&&<>
-      <div style={{fontSize:14,fontWeight:600,color:C.txB,marginBottom:10}}>System Status</div>
-      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(360px,1fr))",gap:12,marginBottom:22}}>
-        {instances.map(inst=>{
-          const s=statuses[inst.id]||{};
-          const health=s.overall_health||"unknown";
-          const trunks=s.trunks||[];
-          const sbcs=s.sbcs||[];
-          const lic=s.license||{};
-          const trunkUp=trunks.filter(t=>t.status==="registered").length;
-          const sbcUp=sbcs.filter(sb=>sb.status==="online").length;
-          return<Card key={inst.id} hv onClick={()=>onNavigate("detail",inst.id)}>
-            <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:12}}>
-              <div><div style={{fontSize:15,fontWeight:600,color:C.txB}}>{inst.name}</div><div style={{fontSize:11,color:C.txM,marginTop:2,fontFamily:M}}>v{inst.detected_version||"?"}</div></div>
-              <Pill status={health}/>
-            </div>
-            <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:4,padding:"12px 0",borderTop:"1px solid "+C.border}}>
-              <Stat l="Trunks" v={`${trunkUp}/${trunks.length}`} c={trunkUp<trunks.length?C.r:C.g}/>
-              <Stat l="SBCs" v={`${sbcUp}/${sbcs.length}`} c={sbcUp<sbcs.length?C.r:C.g}/>
-              <Stat l="License" v={lic.is_valid?"OK":"--"} c={lic.is_valid?C.g:C.y}/>
-              <Stat l="Polled" v={ago(inst.last_poll_at||inst.last_success_at)} c={C.txD}/>
-            </div>
-            <div style={{fontSize:11,color:C.txM,marginTop:6,fontFamily:M}}>{inst.base_url}</div>
-          </Card>;
-        })}
-      </div>
+    {/* SBC Overview */}
+    {s.sbcs.total>0&&<>
+      <div style={{fontSize:14,fontWeight:600,color:C.txB,marginBottom:10}}>SBC Status</div>
+      <Card style={{marginBottom:22,padding:14}}>
+        <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:12}}>
+          <div style={{textAlign:"center"}}><div style={{fontSize:28,fontWeight:700,color:C.g}}>{s.sbcs.online||0}</div><div style={{fontSize:11,color:C.txM}}>Online</div></div>
+          <div style={{textAlign:"center"}}><div style={{fontSize:28,fontWeight:700,color:C.r}}>{s.sbcs.offline||0}</div><div style={{fontSize:11,color:C.txM}}>Offline</div></div>
+          <div style={{textAlign:"center"}}><div style={{fontSize:28,fontWeight:700,color:C.txD}}>{s.sbcs.total||0}</div><div style={{fontSize:11,color:C.txM}}>Total</div></div>
+        </div>
+        {s.sbcs.offline>0&&<div style={{marginTop:10,textAlign:"center"}}><Btn small variant="ghost" onClick={()=>onNavigate("sbcs")}>View SBC Details</Btn></div>}
+      </Card>
     </>}
 
-    {/* Backup Status Table */}
-    {instances.length>0&&<>
-      <div style={{fontSize:14,fontWeight:600,color:C.txB,marginBottom:10}}>Backup Status</div>
+    {/* Problem PBXes */}
+    {(s.problem_pbxes||[]).length>0&&<>
+      <div style={{fontSize:14,fontWeight:600,color:C.txB,marginBottom:10}}>Problem Systems</div>
       <Card style={{marginBottom:22}}>
         <Table cols={[
-          {k:"name",l:"PBX",r:(v,r)=><span style={{fontWeight:500,color:C.txB}}>{r.pbx_name}</span>},
-          {k:"last_backup",l:"Last Backup",r:v=>fTime(v)},
-          {k:"age",l:"Age",r:(v,r)=>{
-            if(!r.last_backup)return<span style={{color:C.r}}>No backups</span>;
-            const h=Math.floor((Date.now()-new Date(r.last_backup).getTime())/3600000);
-            return<span style={{color:h>24?C.r:C.g}}>{h<1?"<1h":h+"h"}</span>;
-          }},
-          {k:"total",l:"Total Backups"},
-          {k:"total_size",l:"Total Size",r:v=>fBytes(v)},
-        ]} data={instances.map(inst=>{
-          const myBackups=(backups||[]).filter(b=>b.pbx_id===inst.id);
-          const latest=myBackups[0];
-          const totalSize=myBackups.reduce((a,b)=>a+(b.size_bytes||0),0);
-          return{id:inst.id,pbx_name:inst.name,last_backup:latest?.downloaded_at||latest?.created_on_pbx,total:myBackups.length,total_size:totalSize};
-        })}/>
+          {k:"name",l:"PBX",r:v=><span style={{fontWeight:500,color:C.txB}}>{v}</span>},
+          {k:"failures",l:"Failures",r:v=><Pill status={v>3?"critical":v>1?"warning":"info"} label={String(v)}/>},
+          {k:"error",l:"Last Error",r:v=><span style={{fontFamily:M,fontSize:11,color:C.r}}>{v||"\u2014"}</span>},
+        ]} data={s.problem_pbxes}/>
       </Card>
     </>}
 
     {/* Recent Alerts */}
     {firingAlerts.length>0&&<>
       <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
-        <div style={{fontSize:14,fontWeight:600,color:C.txB}}>Recent Alerts</div>
+        <div style={{fontSize:14,fontWeight:600,color:C.txB}}>Active Alerts</div>
         <Btn small variant="ghost" onClick={()=>onNavigate("alerts")}>View All</Btn>
       </div>
       <Card>
@@ -474,7 +427,7 @@ function DashboardPage({onNavigate}){
           {k:"title",l:"Alert",r:v=><span style={{fontWeight:500,color:C.txB}}>{v}</span>},
           {k:"pbx_name",l:"PBX"},
           {k:"fired_at",l:"Fired",r:v=>fTime(v)},
-        ]} data={firingAlerts.slice(0,5)}/>
+        ]} data={firingAlerts.slice(0,10)}/>
       </Card>
     </>}
   </div>;
@@ -484,18 +437,24 @@ function DashboardPage({onNavigate}){
    SYSTEMS PAGE (list)
    ═══════════════════════════════════════════════════════════════════════════ */
 function SystemsPage({onSelect,onAdd}){
-  const[instances,setInstances]=useState([]);
+  const[data,setData]=useState({instances:[],total:0,page:1,pages:1});
+  const[search,setSearch]=useState("");
+  const[page,setPageN]=useState(1);
   const[loading,setLoading]=useState(true);
   const[error,setError]=useState("");
   const[deleting,setDeleting]=useState(null);
+  const searchTimer=useRef(null);
 
-  const load=useCallback(async()=>{
-    try{const data=await api.get("/pbx/instances");setInstances(data||[]);setError("");}
+  const load=useCallback(async(pg=page,q=search)=>{
+    try{const d=await api.get(`/pbx/instances?page=${pg}&per_page=50${q?`&search=${encodeURIComponent(q)}`:""}`);setData(d||{instances:[],total:0,page:1,pages:1});setError("");}
     catch{setError("Failed to load systems");}
     finally{setLoading(false);}
-  },[]);
+  },[page,search]);
 
   useEffect(()=>{load();},[load]);
+
+  const onSearch=(v)=>{setSearch(v);clearTimeout(searchTimer.current);searchTimer.current=setTimeout(()=>{setPageN(1);load(1,v);},300);};
+  const goPage=(p)=>{setPageN(p);load(p);};
 
   const deleteInst=async(id,name)=>{
     if(!confirm(`Delete system "${name}"? This cannot be undone.`))return;
@@ -505,35 +464,33 @@ function SystemsPage({onSelect,onAdd}){
     finally{setDeleting(null);}
   };
 
-  if(loading)return<PageLoader/>;
+  if(loading&&data.instances.length===0)return<PageLoader/>;
 
   return<div>
-    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:22}}>
-      <div><h1 style={{fontSize:22,fontWeight:700,color:C.txB,margin:0}}>Systems</h1><p style={{fontSize:13,color:C.txM,margin:"3px 0 0"}}>{instances.length} PBX system{instances.length!==1?"s":""}</p></div>
-      <div style={{display:"flex",gap:8}}><Btn variant="ghost" small onClick={load}><Sv d={iRf} s={14}/> Refresh</Btn><Btn variant="accent" onClick={onAdd}><Sv d={iP} s={14}/> Add System</Btn></div>
+    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:16}}>
+      <div><h1 style={{fontSize:22,fontWeight:700,color:C.txB,margin:0}}>Systems</h1><p style={{fontSize:13,color:C.txM,margin:"3px 0 0"}}>{data.total} PBX system{data.total!==1?"s":""}</p></div>
+      <div style={{display:"flex",gap:8}}><Btn variant="ghost" small onClick={()=>load()}><Sv d={iRf} s={14}/> Refresh</Btn><Btn variant="accent" onClick={onAdd}><Sv d={iP} s={14}/> Add System</Btn></div>
     </div>
-    {error&&<ErrorMsg msg={error} onRetry={load}/>}
-    <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(360px,1fr))",gap:12}}>
-      {instances.map(inst=>{
-        const health=inst.consecutive_failures>0?"warning":"healthy";
-        return<Card key={inst.id} hv onClick={()=>onSelect(inst.id)}>
-          <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:12}}>
-            <div><div style={{fontSize:15,fontWeight:600,color:C.txB}}>{inst.name}</div><div style={{fontSize:11,color:C.txM,marginTop:2,fontFamily:M}}>v{inst.detected_version||"?"} {inst.is_enabled?"":"(disabled)"}</div></div>
-            <div style={{display:"flex",gap:6,alignItems:"center"}}>
-              <Pill status={inst.is_enabled?health:"offline"} label={inst.is_enabled?(inst.consecutive_failures>0?"degraded":"healthy"):"disabled"}/>
-            </div>
-          </div>
-          <div style={{fontSize:11,color:C.txM,fontFamily:M,marginBottom:8}}>{inst.base_url}</div>
-          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",fontSize:11,color:C.txM}}>
-            <span>Polled {ago(inst.last_poll_at||inst.last_success_at)} ago</span>
-            <div style={{display:"flex",gap:4}} onClick={e=>e.stopPropagation()}>
-              <Btn small variant="ghost" onClick={()=>deleteInst(inst.id,inst.name)} loading={deleting===inst.id}><Sv d={iTrash} s={13} c={C.r}/></Btn>
-            </div>
-          </div>
-          {inst.last_error&&<div style={{marginTop:6,fontSize:11,color:C.r,fontFamily:M,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{inst.last_error}</div>}
-        </Card>;
-      })}
-    </div>
+    <div style={{marginBottom:14}}><Input placeholder="Search by name or URL..." value={search} onChange={onSearch}/></div>
+    {error&&<ErrorMsg msg={error} onRetry={()=>load()}/>}
+    <Card>
+      <Table cols={[
+        {k:"name",l:"Name",r:(v,r)=><span style={{fontWeight:600,color:C.txB,cursor:"pointer"}} onClick={()=>onSelect(r.id)}>{v}</span>},
+        {k:"base_url",l:"URL",r:v=><span style={{fontFamily:M,fontSize:11}}>{v}</span>},
+        {k:"detected_version",l:"Version",r:v=><span style={{fontFamily:M,fontSize:11}}>{v||"\u2014"}</span>},
+        {k:"status",l:"Status",r:(v,r)=><Pill status={r.is_enabled?(r.consecutive_failures>0?"warning":"healthy"):"offline"} label={r.is_enabled?(r.consecutive_failures>0?"degraded":"healthy"):"disabled"}/>},
+        {k:"last_poll_at",l:"Last Poll",r:v=>ago(v)},
+        {k:"actions",l:"",r:(v,r)=><div style={{display:"flex",gap:4}} onClick={e=>e.stopPropagation()}>
+          <Btn small variant="ghost" onClick={()=>onSelect(r.id)}><Sv d={iEye} s={13}/></Btn>
+          <Btn small variant="ghost" onClick={()=>deleteInst(r.id,r.name)} loading={deleting===r.id}><Sv d={iTrash} s={13} c={C.r}/></Btn>
+        </div>},
+      ]} data={data.instances}/>
+    </Card>
+    {data.pages>1&&<div style={{display:"flex",justifyContent:"center",gap:6,marginTop:14}}>
+      <Btn small variant="ghost" onClick={()=>goPage(Math.max(1,data.page-1))} disabled={data.page<=1}>Prev</Btn>
+      <span style={{fontSize:12,color:C.txD,padding:"6px 10px"}}>Page {data.page} of {data.pages}</span>
+      <Btn small variant="ghost" onClick={()=>goPage(Math.min(data.pages,data.page+1))} disabled={data.page>=data.pages}>Next</Btn>
+    </div>}
   </div>;
 }
 
@@ -1169,92 +1126,392 @@ function EditUserModal({user,onClose,onSave}){
 /* ═══════════════════════════════════════════════════════════════════════════
    SETTINGS PAGE
    ═══════════════════════════════════════════════════════════════════════════ */
+function SBCPage(){
+  const[sbcs,setSbcs]=useState([]);
+  const[filter,setFilter]=useState("");
+  const[loading,setLoading]=useState(true);
+  const[error,setError]=useState("");
+
+  const load=useCallback(async()=>{
+    try{const d=await api.get("/sbcs"+(filter?`?status=${filter}`:""));setSbcs(d||[]);setError("");}
+    catch{setError("Failed to load SBCs");}
+    finally{setLoading(false);}
+  },[filter]);
+
+  useEffect(()=>{load();const iv=setInterval(load,15000);return()=>clearInterval(iv);},[load]);
+
+  if(loading&&sbcs.length===0)return<PageLoader/>;
+
+  const online=sbcs.filter(s=>s.status==="online").length;
+  const offline=sbcs.filter(s=>s.status==="offline").length;
+
+  return<div>
+    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:22}}>
+      <div><h1 style={{fontSize:22,fontWeight:700,color:C.txB,margin:0}}>SBC Status</h1><p style={{fontSize:13,color:C.txM,margin:"3px 0 0"}}>{online} online, {offline} offline — {sbcs.length} total</p></div>
+      <div style={{display:"flex",gap:8}}>
+        <Select value={filter} onChange={v=>{setFilter(v);setLoading(true);}} options={[{v:"",l:"All"},{v:"online",l:"Online"},{v:"offline",l:"Offline"}]}/>
+        <Btn variant="ghost" small onClick={load}><Sv d={iRf} s={14}/> Refresh</Btn>
+      </div>
+    </div>
+    {error&&<ErrorMsg msg={error} onRetry={load}/>}
+    <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:10,marginBottom:22}}>
+      <Card style={{padding:14,textAlign:"center"}}><Stat l="Online" v={online} c={C.g}/></Card>
+      <Card style={{padding:14,textAlign:"center"}}><Stat l="Offline" v={offline} c={offline>0?C.r:C.txM}/></Card>
+      <Card style={{padding:14,textAlign:"center"}}><Stat l="Total" v={sbcs.length} c={C.b}/></Card>
+    </div>
+    <Card>
+      <Table cols={[
+        {k:"sbc_name",l:"SBC Name",r:v=><span style={{fontWeight:600,color:C.txB}}>{v}</span>},
+        {k:"pbx_name",l:"PBX",r:v=><span style={{fontFamily:M,fontSize:12}}>{v}</span>},
+        {k:"status",l:"Status",r:v=><Pill status={v}/>},
+        {k:"tunnel_status",l:"Tunnel",r:v=><span style={{fontFamily:M,fontSize:11}}>{v||"\u2014"}</span>},
+        {k:"last_seen",l:"Last Seen",r:v=>v?ago(v):"\u2014"},
+      ]} data={sbcs}/>
+    </Card>
+  </div>;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   SETTINGS PAGE (admin)
+   ═══════════════════════════════════════════════════════════════════════════ */
 function SettingsPage(){
   const user=JSON.parse(localStorage.getItem("user")||"{}");
   const isAdmin=user.role==="admin";
-  const[ssoConfig,setSsoConfig]=useState(null);
+  const[tab,setTab]=useState("branding");
+  const[settings,setSettings]=useState({});
+  const[channels,setChannels]=useState([]);
+  const[history,setHistory]=useState([]);
   const[ssoForm,setSsoForm]=useState({tenant_id:"",client_id:"",client_secret:"",redirect_uri:"",auto_create_users:true,default_role:"viewer"});
-  const[savingSso,setSavingSso]=useState(false);
+  const[saving,setSaving]=useState(false);
+  const[loading,setLoading]=useState(true);
+  const[newCh,setNewCh]=useState(null);
 
-  useEffect(()=>{
-    if(isAdmin){
-      api.get("/auth/sso/config").then(d=>{
-        setSsoConfig(d);
-        if(d){setSsoForm({
-          tenant_id:d.tenant_id||"",client_id:d.client_id||"",
-          client_secret:"",redirect_uri:d.redirect_uri||"",
-          auto_create_users:d.auto_create_users!==false,default_role:d.default_role||"viewer",
-        });}
-      }).catch(()=>{});
-    }
-  },[isAdmin]);
+  const loadAll=useCallback(async()=>{
+    try{
+      const[all,chs]=await Promise.all([api.get("/settings"),api.get("/settings/notifications/channels")]);
+      setSettings(all||{});setChannels(chs||[]);
+      try{const sso=await api.get("/auth/sso/config");if(sso)setSsoForm({tenant_id:sso.tenant_id||"",client_id:sso.client_id||"",client_secret:"",redirect_uri:sso.redirect_uri||"",auto_create_users:sso.auto_create_users!==false,default_role:sso.default_role||"viewer"});}catch{}
+      try{const h=await api.get("/settings/notifications/history?limit=50");setHistory(h||[]);}catch{}
+    }catch{}
+    finally{setLoading(false);}
+  },[]);
 
-  const saveSso=async()=>{
-    setSavingSso(true);
-    try{await api.put("/auth/sso/config",ssoForm);alert("SSO configuration saved");}
+  useEffect(()=>{if(isAdmin)loadAll();},[isAdmin,loadAll]);
+
+  const sv=(key)=>{const cats=Object.values(settings);for(const cat of cats){if(cat[key])return cat[key].value;}return null;};
+  const updateSettings=async(updates)=>{
+    setSaving(true);
+    try{await api.put("/settings",updates);await loadAll();alert("Settings saved");}
     catch{alert("Save failed");}
-    finally{setSavingSso(false);}
+    finally{setSaving(false);}
   };
 
+  const tabs=[{id:"branding",l:"Branding"},{id:"notifications",l:"Notifications"},{id:"backup",l:"Backup Storage"},{id:"integrations",l:"Integrations"},{id:"sso",l:"SSO"},{id:"system",l:"System Info"}];
+
+  if(!isAdmin)return<div><h1 style={{fontSize:22,fontWeight:700,color:C.txB}}>Settings</h1><Card style={{marginTop:14}}><div style={{fontSize:13,color:C.txD}}>Username: {user.username} | Role: <Pill status={user.role} label={user.role}/></div></Card></div>;
+  if(loading)return<PageLoader/>;
+
   return<div>
-    <h1 style={{fontSize:22,fontWeight:700,color:C.txB,margin:"0 0 20px"}}>Settings</h1>
-    <div style={{display:"grid",gap:12}}>
-      {/* Current User */}
-      <Card>
-        <div style={{fontSize:14,fontWeight:600,color:C.txB,marginBottom:12}}>Current User</div>
-        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:14,fontSize:13,color:C.txD}}>
-          <div><span style={{color:C.txM}}>Username:</span> {user.username||"\u2014"}</div>
-          <div><span style={{color:C.txM}}>Role:</span> <Pill status={user.role||"viewer"} label={user.role||"viewer"}/></div>
-        </div>
-      </Card>
-
-      {/* Security */}
-      <Card>
-        <div style={{fontSize:14,fontWeight:600,color:C.txB,marginBottom:12}}>Security</div>
-        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:14,fontSize:13,color:C.txD}}>
-          <div><span style={{color:C.txM}}>Encryption:</span> AES-256-GCM</div>
-          <div><span style={{color:C.txM}}>Key source:</span> MASTER_KEY env var</div>
-          <div><span style={{color:C.txM}}>JWT expiry:</span> 60 min</div>
-          <div><span style={{color:C.txM}}>Login lockout:</span> 5 attempts / 15 min</div>
-        </div>
-      </Card>
-
-      {/* Polling */}
-      <Card>
-        <div style={{fontSize:14,fontWeight:600,color:C.txB,marginBottom:12}}>Polling</div>
-        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:14,fontSize:13,color:C.txD}}>
-          <div><span style={{color:C.txM}}>Default interval:</span> 60s</div>
-          <div><span style={{color:C.txM}}>Max backoff:</span> 600s</div>
-          <div><span style={{color:C.txM}}>Alert check:</span> 30s</div>
-          <div><span style={{color:C.txM}}>Capability reprobe:</span> Weekly</div>
-        </div>
-      </Card>
-
-      {/* Database */}
-      <Card>
-        <div style={{fontSize:14,fontWeight:600,color:C.txB,marginBottom:12}}>Database</div>
-        <div style={{fontSize:13,color:C.txD}}>
-          <div style={{fontFamily:M,fontSize:12,color:C.txM}}>PostgreSQL 16 | Audit log: immutable (trigger-protected) | Poll history: 90-day retention</div>
-        </div>
-      </Card>
-
-      {/* Azure AD SSO (admin only) */}
-      {isAdmin&&<Card>
-        <div style={{fontSize:14,fontWeight:600,color:C.txB,marginBottom:4}}>Azure AD SSO</div>
-        <div style={{fontSize:12,color:C.txM,marginBottom:16}}>Configure Microsoft Azure Active Directory single sign-on</div>
-        <Input label="Tenant ID" value={ssoForm.tenant_id} onChange={v=>setSsoForm(p=>({...p,tenant_id:v}))} mono placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"/>
-        <Input label="Client ID" value={ssoForm.client_id} onChange={v=>setSsoForm(p=>({...p,client_id:v}))} mono placeholder="Application (client) ID"/>
-        <Input label="Client Secret" value={ssoForm.client_secret} onChange={v=>setSsoForm(p=>({...p,client_secret:v}))} type="password" placeholder="Leave blank to keep current"/>
-        <Input label="Redirect URI" value={ssoForm.redirect_uri} onChange={v=>setSsoForm(p=>({...p,redirect_uri:v}))} mono placeholder="https://your-domain.com/api/auth/sso/callback"/>
-        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:14}}>
-          <div style={{marginBottom:16}}><label style={{display:"flex",alignItems:"center",gap:8,cursor:"pointer"}}><input type="checkbox" checked={ssoForm.auto_create_users} onChange={e=>setSsoForm(p=>({...p,auto_create_users:e.target.checked}))} style={{accentColor:C.ac}}/><span style={{fontSize:13,color:C.txB}}>Auto-create users on first SSO login</span></label></div>
-          <Select label="Default SSO Role" value={ssoForm.default_role} onChange={v=>setSsoForm(p=>({...p,default_role:v}))} options={[{v:"viewer",l:"Viewer"},{v:"operator",l:"Operator"},{v:"admin",l:"Admin"}]}/>
-        </div>
-        <div style={{display:"flex",justifyContent:"flex-end",paddingTop:8,borderTop:"1px solid "+C.border}}>
-          <Btn variant="primary" onClick={saveSso} loading={savingSso}>Save SSO Config</Btn>
-        </div>
-      </Card>}
+    <h1 style={{fontSize:22,fontWeight:700,color:C.txB,margin:"0 0 16px"}}>Admin Settings</h1>
+    <div style={{display:"flex",gap:4,marginBottom:18,borderBottom:"1px solid "+C.border,paddingBottom:2}}>
+      {tabs.map(t=><button key={t.id} onClick={()=>setTab(t.id)} style={{padding:"8px 16px",border:"none",borderBottom:tab===t.id?"2px solid "+C.ac:"2px solid transparent",background:"transparent",color:tab===t.id?C.txB:C.txM,cursor:"pointer",fontFamily:F,fontSize:13,fontWeight:tab===t.id?600:400}}>{t.l}</button>)}
     </div>
+
+    {/* BRANDING TAB */}
+    {tab==="branding"&&<BrandingTab settings={settings} sv={sv} updateSettings={updateSettings} saving={saving}/>}
+
+    {/* NOTIFICATIONS TAB */}
+    {tab==="notifications"&&<NotificationsTab settings={settings} sv={sv} updateSettings={updateSettings} saving={saving} channels={channels} history={history} onReload={loadAll} newCh={newCh} setNewCh={setNewCh}/>}
+
+    {/* BACKUP STORAGE TAB */}
+    {tab==="backup"&&<BackupStorageTab settings={settings} sv={sv} updateSettings={updateSettings} saving={saving}/>}
+
+    {/* INTEGRATIONS TAB */}
+    {tab==="integrations"&&<IntegrationsTab settings={settings} sv={sv} updateSettings={updateSettings} saving={saving}/>}
+
+    {/* SSO TAB */}
+    {tab==="sso"&&<Card>
+      <div style={{fontSize:14,fontWeight:600,color:C.txB,marginBottom:4}}>Azure AD SSO</div>
+      <div style={{fontSize:12,color:C.txM,marginBottom:16}}>Configure Microsoft Azure Active Directory single sign-on</div>
+      <Input label="Tenant ID" value={ssoForm.tenant_id} onChange={v=>setSsoForm(p=>({...p,tenant_id:v}))} mono placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"/>
+      <Input label="Client ID" value={ssoForm.client_id} onChange={v=>setSsoForm(p=>({...p,client_id:v}))} mono placeholder="Application (client) ID"/>
+      <Input label="Client Secret" value={ssoForm.client_secret} onChange={v=>setSsoForm(p=>({...p,client_secret:v}))} type="password" placeholder="Leave blank to keep current"/>
+      <Input label="Redirect URI" value={ssoForm.redirect_uri} onChange={v=>setSsoForm(p=>({...p,redirect_uri:v}))} mono placeholder="https://your-domain.com/api/auth/sso/callback"/>
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:14}}>
+        <div style={{marginBottom:16}}><label style={{display:"flex",alignItems:"center",gap:8,cursor:"pointer"}}><input type="checkbox" checked={ssoForm.auto_create_users} onChange={e=>setSsoForm(p=>({...p,auto_create_users:e.target.checked}))} style={{accentColor:C.ac}}/><span style={{fontSize:13,color:C.txB}}>Auto-create users on first SSO login</span></label></div>
+        <Select label="Default SSO Role" value={ssoForm.default_role} onChange={v=>setSsoForm(p=>({...p,default_role:v}))} options={[{v:"viewer",l:"Viewer"},{v:"operator",l:"Operator"},{v:"admin",l:"Admin"}]}/>
+      </div>
+      <div style={{display:"flex",justifyContent:"flex-end",paddingTop:8,borderTop:"1px solid "+C.border}}>
+        <Btn variant="primary" onClick={async()=>{setSaving(true);try{await api.put("/auth/sso/config",ssoForm);alert("SSO saved");}catch{alert("Save failed");}finally{setSaving(false);}}} loading={saving}>Save SSO Config</Btn>
+      </div>
+    </Card>}
+
+    {/* SYSTEM INFO TAB */}
+    {tab==="system"&&<div style={{display:"grid",gap:12}}>
+      <Card><div style={{fontSize:14,fontWeight:600,color:C.txB,marginBottom:12}}>Current User</div><div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:14,fontSize:13,color:C.txD}}><div><span style={{color:C.txM}}>Username:</span> {user.username||"\u2014"}</div><div><span style={{color:C.txM}}>Role:</span> <Pill status={user.role||"viewer"} label={user.role||"viewer"}/></div></div></Card>
+      <Card><div style={{fontSize:14,fontWeight:600,color:C.txB,marginBottom:12}}>Security</div><div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:14,fontSize:13,color:C.txD}}><div><span style={{color:C.txM}}>Encryption:</span> AES-256-GCM</div><div><span style={{color:C.txM}}>Key source:</span> MASTER_KEY env var</div><div><span style={{color:C.txM}}>JWT expiry:</span> 60 min</div><div><span style={{color:C.txM}}>Login lockout:</span> 5 attempts / 15 min</div></div></Card>
+      <Card><div style={{fontSize:14,fontWeight:600,color:C.txB,marginBottom:12}}>Infrastructure</div><div style={{fontSize:12,fontFamily:M,color:C.txM}}>PostgreSQL 16 | Redis 7 | Celery 5.4 | Poll: 15s beat, 30s alerts | Audit: immutable | Poll history: 90-day retention</div></Card>
+    </div>}
+  </div>;
+}
+
+function BrandingTab({sv,updateSettings,saving}){
+  const[name,setName]=useState(sv("branding.company_name")||"PBXMonitorX");
+  const[logo,setLogo]=useState(sv("branding.logo_url")||"");
+  const[color,setColor]=useState(sv("branding.primary_color")||"#C8965A");
+  const[favicon,setFavicon]=useState(sv("branding.favicon_url")||"");
+  return<div style={{display:"grid",gap:12}}>
+    <Card>
+      <div style={{fontSize:14,fontWeight:600,color:C.txB,marginBottom:4}}>Branding</div>
+      <div style={{fontSize:12,color:C.txM,marginBottom:16}}>Customize the appearance of PBXMonitorX</div>
+      <Input label="Company Name" value={name} onChange={setName} placeholder="Your Company Name"/>
+      <Input label="Logo URL" value={logo} onChange={setLogo} mono placeholder="https://example.com/logo.png or data:image/..."/>
+      <div style={{marginBottom:16}}><label style={{fontSize:12,fontWeight:500,color:C.txD,display:"block",marginBottom:4}}>Primary Accent Color</label><div style={{display:"flex",gap:8,alignItems:"center"}}><input type="color" value={color} onChange={e=>setColor(e.target.value)} style={{width:40,height:32,border:"1px solid "+C.border,borderRadius:4,cursor:"pointer"}}/><input value={color} onChange={e=>setColor(e.target.value)} style={{background:C.bg1,border:"1px solid "+C.border,borderRadius:6,padding:"6px 10px",color:C.txB,fontFamily:M,fontSize:12,width:100}}/><div style={{width:24,height:24,borderRadius:4,background:color}}/></div></div>
+      <Input label="Favicon URL" value={favicon} onChange={setFavicon} mono placeholder="https://example.com/favicon.ico"/>
+      {logo&&<div style={{marginBottom:12}}><label style={{fontSize:12,color:C.txM}}>Preview:</label><div style={{marginTop:4,background:C.bg1,padding:12,borderRadius:6,display:"inline-block"}}><img src={logo} alt="logo preview" style={{maxHeight:40,maxWidth:200}} onError={e=>{e.target.style.display="none";}}/></div></div>}
+      <div style={{display:"flex",justifyContent:"flex-end",paddingTop:8,borderTop:"1px solid "+C.border}}>
+        <Btn variant="primary" onClick={()=>updateSettings({"branding.company_name":name,"branding.logo_url":logo,"branding.primary_color":color,"branding.favicon_url":favicon})} loading={saving}>Save Branding</Btn>
+      </div>
+    </Card>
+  </div>;
+}
+
+function NotificationsTab({sv,updateSettings,saving,channels,history,onReload,newCh,setNewCh}){
+  const enabled=sv("notifications.enabled");
+  const[testing,setTesting]=useState(null);
+  const toggles=[
+    {k:"notifications.alert_on_trunk_down",l:"Trunk Down"},
+    {k:"notifications.alert_on_sbc_offline",l:"SBC Offline"},
+    {k:"notifications.alert_on_backup_fail",l:"Backup Failed"},
+    {k:"notifications.alert_on_backup_success",l:"Backup Success"},
+    {k:"notifications.alert_on_license_expiring",l:"License Expiring"},
+    {k:"notifications.alert_on_pbx_unreachable",l:"PBX Unreachable"},
+  ];
+
+  const testCh=async(id)=>{setTesting(id);try{const r=await api.post(`/settings/notifications/channels/${id}/test`);alert(r.success?"Test sent!":"Test failed: "+(r.error||"unknown"));}catch{alert("Test failed");}finally{setTesting(null);}};
+  const deleteCh=async(id)=>{if(!confirm("Delete this channel?"))return;try{await api.del(`/settings/notifications/channels/${id}`);onReload();}catch{alert("Delete failed");}};
+  const createCh=async()=>{if(!newCh?.name)return;try{await api.post("/settings/notifications/channels",newCh);setNewCh(null);onReload();}catch{alert("Create failed");}};
+
+  return<div style={{display:"grid",gap:12}}>
+    <Card>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
+        <div><div style={{fontSize:14,fontWeight:600,color:C.txB}}>Notifications</div><div style={{fontSize:12,color:C.txM}}>Global notification settings</div></div>
+        <label style={{display:"flex",alignItems:"center",gap:8,cursor:"pointer"}}><span style={{fontSize:13,color:enabled?C.g:C.txM}}>{enabled?"Enabled":"Disabled"}</span><input type="checkbox" checked={!!enabled} onChange={e=>updateSettings({"notifications.enabled":e.target.checked})} style={{accentColor:C.ac}}/></label>
+      </div>
+      <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:8}}>
+        {toggles.map(t=><label key={t.k} style={{display:"flex",alignItems:"center",gap:6,cursor:"pointer",padding:"6px 8px",background:C.bg1,borderRadius:6,border:"1px solid "+C.border}}><input type="checkbox" checked={!!sv(t.k)} onChange={e=>updateSettings({[t.k]:e.target.checked})} style={{accentColor:C.ac}}/><span style={{fontSize:12,color:C.txB}}>{t.l}</span></label>)}
+      </div>
+    </Card>
+
+    <Card>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
+        <div style={{fontSize:14,fontWeight:600,color:C.txB}}>Notification Channels</div>
+        <Btn small variant="accent" onClick={()=>setNewCh({name:"",channel_type:"email",config:{smtp_host:"",smtp_port:587,smtp_user:"",smtp_pass:"",from_addr:"",to_addrs:[],use_tls:true},is_enabled:true})}><Sv d={iP} s={13}/> Add Channel</Btn>
+      </div>
+      {channels.map(ch=><div key={ch.id} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"10px 12px",background:C.bg1,borderRadius:6,marginBottom:6,border:"1px solid "+C.border}}>
+        <div><span style={{fontWeight:500,color:C.txB}}>{ch.name}</span><span style={{fontSize:11,color:C.txM,marginLeft:8}}>{ch.channel_type}</span></div>
+        <div style={{display:"flex",gap:4}}>
+          <Pill status={ch.is_enabled?"active":"inactive"} label={ch.is_enabled?"active":"disabled"}/>
+          <Btn small variant="ghost" onClick={()=>testCh(ch.id)} loading={testing===ch.id}>Test</Btn>
+          <Btn small variant="ghost" onClick={()=>deleteCh(ch.id)}><Sv d={iTrash} s={13} c={C.r}/></Btn>
+        </div>
+      </div>)}
+      {channels.length===0&&<div style={{fontSize:12,color:C.txM,textAlign:"center",padding:20}}>No notification channels configured</div>}
+    </Card>
+
+    {newCh&&<Card>
+      <div style={{fontSize:14,fontWeight:600,color:C.txB,marginBottom:12}}>New Channel</div>
+      <Input label="Name" value={newCh.name} onChange={v=>setNewCh(p=>({...p,name:v}))} placeholder="e.g. IT Team Email"/>
+      <Select label="Type" value={newCh.channel_type} onChange={v=>setNewCh(p=>({...p,channel_type:v}))} options={[{v:"email",l:"Email (SMTP)"},{v:"webhook",l:"Webhook"},{v:"halopsa",l:"HaloPSA"}]}/>
+      {newCh.channel_type==="email"&&<>
+        <div style={{display:"grid",gridTemplateColumns:"2fr 1fr",gap:8}}><Input label="SMTP Host" value={newCh.config.smtp_host||""} onChange={v=>setNewCh(p=>({...p,config:{...p.config,smtp_host:v}}))}/><Input label="Port" value={String(newCh.config.smtp_port||587)} onChange={v=>setNewCh(p=>({...p,config:{...p.config,smtp_port:parseInt(v)||587}}))}/></div>
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}><Input label="SMTP User" value={newCh.config.smtp_user||""} onChange={v=>setNewCh(p=>({...p,config:{...p.config,smtp_user:v}}))}/><Input label="SMTP Password" type="password" value={newCh.config.smtp_pass||""} onChange={v=>setNewCh(p=>({...p,config:{...p.config,smtp_pass:v}}))}/></div>
+        <Input label="From Address" value={newCh.config.from_addr||""} onChange={v=>setNewCh(p=>({...p,config:{...p.config,from_addr:v}}))} placeholder="alerts@example.com"/>
+        <Input label="To Addresses (comma-separated)" value={(newCh.config.to_addrs||[]).join(",")} onChange={v=>setNewCh(p=>({...p,config:{...p.config,to_addrs:v.split(",").map(s=>s.trim()).filter(Boolean)}}))} placeholder="admin@example.com, ops@example.com"/>
+      </>}
+      {(newCh.channel_type==="webhook"||newCh.channel_type==="halopsa")&&<>
+        <Input label="Webhook URL" value={newCh.config.url||""} onChange={v=>setNewCh(p=>({...p,config:{...p.config,url:v}}))} mono placeholder="https://api.example.com/webhook"/>
+      </>}
+      <div style={{display:"flex",gap:8,justifyContent:"flex-end",paddingTop:8,borderTop:"1px solid "+C.border}}>
+        <Btn variant="ghost" onClick={()=>setNewCh(null)}>Cancel</Btn>
+        <Btn variant="primary" onClick={createCh}>Create Channel</Btn>
+      </div>
+    </Card>}
+
+    {history.length>0&&<Card>
+      <div style={{fontSize:14,fontWeight:600,color:C.txB,marginBottom:12}}>Recent Notifications</div>
+      <Table cols={[
+        {k:"notification_type",l:"Type",r:v=><Pill status={v.includes("fail")?"error":"info"} label={v.replace(/_/g," ")}/>},
+        {k:"subject",l:"Subject",r:v=><span style={{fontSize:11}}>{(v||"").substring(0,60)}</span>},
+        {k:"recipient",l:"To",r:v=><span style={{fontFamily:M,fontSize:11}}>{(v||"").substring(0,30)}</span>},
+        {k:"success",l:"Status",r:v=><Pill status={v?"pass":"fail"} label={v?"sent":"failed"}/>},
+        {k:"sent_at",l:"Sent",r:v=>fTime(v)},
+      ]} data={history}/>
+    </Card>}
+  </div>;
+}
+
+function BackupStorageTab({sv,updateSettings,saving}){
+  const[storageType,setStorageType]=useState(sv("backup.storage_type")||"local");
+  const[localPath,setLocalPath]=useState(sv("backup.default_storage_path")||"/data/backups");
+  const[s3Bucket,setS3Bucket]=useState(sv("backup.s3_bucket")||"");
+  const[s3Region,setS3Region]=useState(sv("backup.s3_region")||"");
+  const[s3Key,setS3Key]=useState(sv("backup.s3_access_key")||"");
+  const[sftpHost,setSftpHost]=useState(sv("backup.sftp_host")||"");
+  const[sftpPort,setSftpPort]=useState(sv("backup.sftp_port")||"22");
+  const[sftpUser,setSftpUser]=useState(sv("backup.sftp_user")||"");
+  const[sftpPath,setSftpPath]=useState(sv("backup.sftp_path")||"");
+  const[retainCount,setRetainCount]=useState(sv("backup.default_retain_count")||"10");
+  const[retainDays,setRetainDays]=useState(sv("backup.default_retain_days")||"30");
+
+  const save=()=>{
+    const u={"backup.storage_type":storageType,"backup.default_storage_path":localPath,"backup.s3_bucket":s3Bucket,"backup.s3_region":s3Region,"backup.s3_access_key":s3Key,"backup.sftp_host":sftpHost,"backup.sftp_port":sftpPort,"backup.sftp_user":sftpUser,"backup.sftp_path":sftpPath,"backup.default_retain_count":parseInt(retainCount)||10,"backup.default_retain_days":parseInt(retainDays)||30};
+    updateSettings(u);
+  };
+
+  return<div style={{display:"grid",gap:12}}>
+    <Card>
+      <div style={{fontSize:14,fontWeight:600,color:C.txB,marginBottom:4}}>Backup Storage</div>
+      <div style={{fontSize:12,color:C.txM,marginBottom:16}}>Configure where PBX backups are stored</div>
+      <Select label="Storage Type" value={storageType} onChange={setStorageType} options={[{v:"local",l:"Local Filesystem"},{v:"s3",l:"Amazon S3 / Compatible"},{v:"sftp",l:"SFTP Remote Server"}]}/>
+      {storageType==="local"&&<Input label="Storage Path" value={localPath} onChange={setLocalPath} mono placeholder="/data/backups"/>}
+      {storageType==="s3"&&<><Input label="S3 Bucket" value={s3Bucket} onChange={setS3Bucket} mono/><Input label="S3 Region" value={s3Region} onChange={setS3Region} mono placeholder="us-east-1"/><Input label="Access Key" value={s3Key} onChange={setS3Key} mono/><div style={{fontSize:11,color:C.txM,margin:"-8px 0 12px"}}>Secret key stored encrypted on server</div></>}
+      {storageType==="sftp"&&<><div style={{display:"grid",gridTemplateColumns:"3fr 1fr",gap:8}}><Input label="SFTP Host" value={sftpHost} onChange={setSftpHost} mono/><Input label="Port" value={sftpPort} onChange={setSftpPort}/></div><Input label="Username" value={sftpUser} onChange={setSftpUser} mono/><Input label="Remote Path" value={sftpPath} onChange={setSftpPath} mono placeholder="/backups/pbx"/></>}
+    </Card>
+    <Card>
+      <div style={{fontSize:14,fontWeight:600,color:C.txB,marginBottom:12}}>Default Retention Policy</div>
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}><Input label="Keep Last N Backups" value={retainCount} onChange={setRetainCount}/><Input label="Keep Backups for N Days" value={retainDays} onChange={setRetainDays}/></div>
+      <div style={{display:"flex",justifyContent:"flex-end",paddingTop:8,borderTop:"1px solid "+C.border}}>
+        <Btn variant="primary" onClick={save} loading={saving}>Save Backup Settings</Btn>
+      </div>
+    </Card>
+  </div>;
+}
+
+function IntegrationsTab({sv,updateSettings,saving}){
+  const[haloEnabled,setHaloEnabled]=useState(!!sv("integrations.halopsa_enabled"));
+  const[haloUrl,setHaloUrl]=useState(sv("integrations.halopsa_api_url")||"");
+  const[haloClientId,setHaloClientId]=useState(sv("integrations.halopsa_client_id")||"");
+  const[haloTicketType,setHaloTicketType]=useState(sv("integrations.halopsa_ticket_type_id")||"0");
+  const[haloAgent,setHaloAgent]=useState(sv("integrations.halopsa_agent_id")||"0");
+
+  return<Card>
+    <div style={{fontSize:14,fontWeight:600,color:C.txB,marginBottom:4}}>HaloPSA Integration</div>
+    <div style={{fontSize:12,color:C.txM,marginBottom:16}}>Create tickets in HaloPSA when alerts fire. Configure a webhook notification channel with HaloPSA type for delivery.</div>
+    <div style={{marginBottom:16}}><label style={{display:"flex",alignItems:"center",gap:8,cursor:"pointer"}}><input type="checkbox" checked={haloEnabled} onChange={e=>setHaloEnabled(e.target.checked)} style={{accentColor:C.ac}}/><span style={{fontSize:13,color:C.txB}}>Enable HaloPSA Integration</span></label></div>
+    {haloEnabled&&<>
+      <Input label="HaloPSA API URL" value={haloUrl} onChange={setHaloUrl} mono placeholder="https://yourcompany.halopsa.com/api"/>
+      <Input label="OAuth Client ID" value={haloClientId} onChange={setHaloClientId} mono/>
+      <div style={{fontSize:11,color:C.txM,margin:"-8px 0 12px"}}>Client secret stored encrypted on server</div>
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
+        <Input label="Default Ticket Type ID" value={haloTicketType} onChange={setHaloTicketType}/>
+        <Input label="Default Agent/Team ID" value={haloAgent} onChange={setHaloAgent}/>
+      </div>
+    </>}
+    <div style={{display:"flex",justifyContent:"flex-end",paddingTop:8,borderTop:"1px solid "+C.border}}>
+      <Btn variant="primary" onClick={()=>updateSettings({"integrations.halopsa_enabled":haloEnabled,"integrations.halopsa_api_url":haloUrl,"integrations.halopsa_client_id":haloClientId,"integrations.halopsa_ticket_type_id":parseInt(haloTicketType)||0,"integrations.halopsa_agent_id":parseInt(haloAgent)||0})} loading={saving}>Save Integration</Btn>
+    </div>
+  </Card>;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   EVENT LOG PAGE
+   ═══════════════════════════════════════════════════════════════════════════ */
+function EventLogPage(){
+  const[events,setEvents]=useState(null);
+  const[stats,setStats]=useState(null);
+  const[level,setLevel]=useState("");
+  const[source,setSource]=useState("");
+  const[search,setSearch]=useState("");
+  const[page,setPage]=useState(1);
+  const[expanded,setExpanded]=useState(null);
+  const perPage=50;
+
+  const load=useCallback(()=>{
+    const params=new URLSearchParams({page,per_page:perPage});
+    if(level)params.set("level",level);
+    if(source)params.set("source",source);
+    if(search)params.set("search",search);
+    api.get("/events?"+params).then(setEvents).catch(()=>{});
+  },[level,source,search,page]);
+
+  useEffect(()=>{load()},[load]);
+  useEffect(()=>{api.get("/events/stats").then(setStats).catch(()=>{})},[]);
+
+  const levelColors={debug:C.txM,info:C.b,warning:C.y,error:C.r,critical:C.r};
+  const levelBgs={debug:"rgba(94,90,85,.06)",info:C.bB,warning:C.yB,error:C.rB,critical:C.rB};
+
+  return<div style={{animation:"fadeIn .2s"}}>
+    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:20}}>
+      <div><h1 style={{fontSize:22,fontWeight:700,color:C.txB,margin:0}}>Event Log</h1>
+        <p style={{fontSize:13,color:C.txM,margin:"3px 0 0"}}>Operational events and errors for troubleshooting</p></div>
+      <div style={{display:"flex",gap:8}}>
+        <Btn small onClick={load}><Sv d={iRf} s={13}/> Refresh</Btn>
+      </div>
+    </div>
+
+    {/* Stats cards */}
+    {stats&&<div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(140px,1fr))",gap:12,marginBottom:20}}>
+      {["debug","info","warning","error","critical"].map(l=><div key={l} style={{background:C.bg1,border:"1px solid "+C.border,borderRadius:8,padding:"12px 16px",textAlign:"center"}}>
+        <div style={{fontSize:18,fontWeight:700,color:levelColors[l]||C.txB,fontFamily:M}}>{stats.by_level[l]||0}</div>
+        <div style={{fontSize:10,color:C.txM,textTransform:"uppercase",letterSpacing:".06em",marginTop:2,fontWeight:600}}>{l}</div>
+      </div>)}
+    </div>}
+
+    {/* Filters */}
+    <div style={{display:"flex",gap:8,marginBottom:16,flexWrap:"wrap"}}>
+      <select value={level} onChange={e=>{setLevel(e.target.value);setPage(1)}} style={{background:C.bg2,border:"1px solid "+C.border,color:C.tx,padding:"6px 10px",borderRadius:6,fontSize:12,fontFamily:F}}>
+        <option value="">All Levels</option>
+        {["debug","info","warning","error","critical"].map(l=><option key={l} value={l}>{l.charAt(0).toUpperCase()+l.slice(1)}</option>)}
+      </select>
+      <select value={source} onChange={e=>{setSource(e.target.value);setPage(1)}} style={{background:C.bg2,border:"1px solid "+C.border,color:C.tx,padding:"6px 10px",borderRadius:6,fontSize:12,fontFamily:F}}>
+        <option value="">All Sources</option>
+        {["polling","backup","alert","adapter","notification","auth","system","scheduler","settings"].map(s=><option key={s} value={s}>{s.charAt(0).toUpperCase()+s.slice(1)}</option>)}
+      </select>
+      <input value={search} onChange={e=>{setSearch(e.target.value);setPage(1)}} placeholder="Search messages..." style={{background:C.bg2,border:"1px solid "+C.border,color:C.tx,padding:"6px 10px",borderRadius:6,fontSize:12,fontFamily:F,flex:1,minWidth:180}}/>
+    </div>
+
+    {/* Recent errors */}
+    {stats?.recent_errors?.length>0&&<div style={{background:C.rB,border:"1px solid rgba(231,76,60,.2)",borderRadius:8,padding:"12px 16px",marginBottom:16}}>
+      <div style={{fontSize:12,fontWeight:600,color:C.r,marginBottom:6}}>Recent Errors</div>
+      {stats.recent_errors.slice(0,5).map(e=><div key={e.id} style={{fontSize:11,color:C.tx,padding:"2px 0",fontFamily:M}}>
+        <span style={{color:C.txM}}>{fTime(e.timestamp)}</span> <span style={{color:C.r}}>[{e.source}]</span> {e.message}
+      </div>)}
+    </div>}
+
+    {/* Event table */}
+    {!events?<PageLoader/>:<>
+      <div style={{background:C.bg1,border:"1px solid "+C.border,borderRadius:8,overflow:"hidden"}}>
+        <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}>
+          <thead><tr style={{borderBottom:"1px solid "+C.border}}>
+            {["Time","Level","Source","PBX","Event","Message","ms"].map(h=><th key={h} style={{padding:"8px 10px",textAlign:"left",fontSize:10,fontWeight:600,color:C.txM,textTransform:"uppercase",letterSpacing:".05em"}}>{h}</th>)}
+          </tr></thead>
+          <tbody>{events.events.map(e=><>
+            <tr key={e.id} onClick={()=>setExpanded(expanded===e.id?null:e.id)} style={{borderBottom:"1px solid "+C.border,cursor:"pointer",background:expanded===e.id?C.bg2:"transparent",transition:"background .12s"}}>
+              <td style={{padding:"6px 10px",fontFamily:M,fontSize:11,color:C.txM,whiteSpace:"nowrap"}}>{fTime(e.timestamp)}</td>
+              <td style={{padding:"6px 10px"}}><span style={{display:"inline-block",padding:"1px 7px",borderRadius:99,fontSize:10,fontWeight:600,color:levelColors[e.level]||C.txM,background:levelBgs[e.level]||"transparent"}}>{e.level}</span></td>
+              <td style={{padding:"6px 10px",fontFamily:M,fontSize:11,color:C.ac}}>{e.source}</td>
+              <td style={{padding:"6px 10px",fontSize:11,color:C.txD}}>{e.pbx_name||"\u2014"}</td>
+              <td style={{padding:"6px 10px",fontFamily:M,fontSize:11,color:C.tx}}>{e.event_type}</td>
+              <td style={{padding:"6px 10px",fontSize:11,color:C.tx,maxWidth:400,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{e.message}</td>
+              <td style={{padding:"6px 10px",fontFamily:M,fontSize:11,color:C.txD,textAlign:"right"}}>{e.duration_ms!=null?e.duration_ms:"\u2014"}</td>
+            </tr>
+            {expanded===e.id&&<tr key={e.id+"-detail"}><td colSpan={7} style={{padding:"10px 14px",background:C.bg2,borderBottom:"1px solid "+C.border}}>
+              <div style={{fontSize:11,fontFamily:M,color:C.tx}}>
+                <div style={{marginBottom:6}}><strong style={{color:C.txB}}>Full Message:</strong> {e.message}</div>
+                {e.detail&&Object.keys(e.detail).length>0&&<div style={{marginBottom:6}}><strong style={{color:C.txB}}>Detail:</strong><pre style={{margin:"4px 0",padding:8,background:C.bg0,borderRadius:4,fontSize:10,color:C.txD,overflow:"auto",maxHeight:200}}>{JSON.stringify(e.detail,null,2)}</pre></div>}
+                {e.error_trace&&<div><strong style={{color:C.r}}>Stack Trace:</strong><pre style={{margin:"4px 0",padding:8,background:C.bg0,borderRadius:4,fontSize:10,color:C.r,overflow:"auto",maxHeight:300,whiteSpace:"pre-wrap"}}>{e.error_trace}</pre></div>}
+              </div>
+            </td></tr>}
+          </>)}</tbody>
+        </table>
+      </div>
+      {events.pages>1&&<div style={{display:"flex",justifyContent:"center",gap:6,marginTop:14}}>
+        <Btn small variant="ghost" onClick={()=>setPage(Math.max(1,page-1))} disabled={page<=1}>Prev</Btn>
+        <span style={{fontSize:12,color:C.txM,padding:"6px 8px",fontFamily:M}}>{page} / {events.pages}</span>
+        <Btn small variant="ghost" onClick={()=>setPage(Math.min(events.pages,page+1))} disabled={page>=events.pages}>Next</Btn>
+      </div>}
+    </>}
   </div>;
 }
 
@@ -1308,12 +1565,13 @@ export default function App(){
   const nav=[
     {id:"dashboard",l:"Dashboard",d:"M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-4 0v-4a1 1 0 011-1h2a1 1 0 011 1v4"},
     {id:"systems",l:"Systems",d:"M4 6h16M4 6a2 2 0 012-2h12a2 2 0 012 2M4 6v4a2 2 0 002 2h12a2 2 0 002-2V6M6 8h.01M6 16h.01M4 14h16v4a2 2 0 01-2 2H6a2 2 0 01-2-2v-4"},
+    {id:"sbcs",l:"SBC Status",d:iSh},
     {id:"phones",l:"Phone Numbers",d:iPhone},
     {id:"backups",l:"Backups",d:iDl},
     {id:"alerts",l:"Alerts",d:"M15 17h5l-1.405-1.405A2.032 2.032 0 0118 14.158V11a6 6 0 00-5-5.917V4a1 1 0 10-2 0v1.083A6 6 0 006 11v3.159c0 .538-.214 1.055-.595 1.436L4 17h5m6 0a3 3 0 11-6 0"},
     {id:"audit",l:"Audit Log",d:"M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2"},
     ...(isAdmin?[{id:"users",l:"Users",d:iUser}]:[]),
-    {id:"settings",l:"Settings",d:"M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.066 2.573c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.573 1.066c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.066-2.573c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065zM15 12a3 3 0 11-6 0 3 3 0 016 0z"},
+    ...(isAdmin?[{id:"settings",l:"Settings",d:"M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.066 2.573c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.573 1.066c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.066-2.573c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065zM15 12a3 3 0 11-6 0 3 3 0 016 0z"}]:[]),
   ];
 
   const renderPage=()=>{
@@ -1321,12 +1579,13 @@ export default function App(){
     switch(page){
       case"dashboard":return<DashboardPage onNavigate={navigate}/>;
       case"systems":return<SystemsPage onSelect={id=>setDetailId(id)} onAdd={()=>setShowAdd(true)}/>;
+      case"sbcs":return<SBCPage/>;
       case"phones":return<PhoneNumbersPage/>;
       case"backups":return<BackupsPage/>;
       case"alerts":return<AlertsPage/>;
       case"audit":return<AuditPage/>;
       case"users":return isAdmin?<UsersPage/>:<DashboardPage onNavigate={navigate}/>;
-      case"settings":return<SettingsPage/>;
+      case"settings":return isAdmin?<SettingsPage/>:<DashboardPage onNavigate={navigate}/>;
       default:return<DashboardPage onNavigate={navigate}/>;
     }
   };
