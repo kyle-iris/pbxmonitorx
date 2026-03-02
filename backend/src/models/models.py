@@ -13,6 +13,36 @@ from sqlalchemy.dialects.postgresql import UUID, JSONB, INET, ENUM as PG_ENUM
 from sqlalchemy.orm import DeclarativeBase, relationship
 
 
+tls_policy_enum = PG_ENUM(
+    'verify', 'trust_self_signed',
+    name='tls_policy_t', create_type=False,
+)
+
+user_role_enum = PG_ENUM(
+    'viewer', 'operator', 'admin',
+    name='user_role_t', create_type=False,
+)
+
+capability_enum = PG_ENUM(
+    'available', 'degraded', 'unavailable', 'untested',
+    name='capability_t', create_type=False,
+)
+
+trunk_status_enum = PG_ENUM(
+    'registered', 'unregistered', 'error', 'unknown',
+    name='trunk_status_t', create_type=False,
+)
+
+sbc_status_enum = PG_ENUM(
+    'online', 'offline', 'unknown',
+    name='sbc_status_t', create_type=False,
+)
+
+alert_severity_enum = PG_ENUM(
+    'info', 'warning', 'critical',
+    name='alert_severity_t', create_type=False,
+)
+
 alert_state_enum = PG_ENUM(
     'firing', 'acknowledged', 'resolved',
     name='alert_state_t', create_type=False,
@@ -49,7 +79,7 @@ class AppUser(Base):
     username = Column(String(100), unique=True, nullable=False)
     email = Column(String(255), unique=True)
     password_hash = Column(String(255), nullable=True)       # NULL for SSO-only users
-    role = Column(String(20), nullable=False, default="viewer")
+    role = Column(user_role_enum, nullable=False, default="viewer")
     auth_method = Column(String(20), nullable=False, default="local")  # 'local' or 'azure_ad'
     azure_oid = Column(String(100))                          # Azure AD Object ID
     display_name = Column(String(200))                       # Full name from Azure AD
@@ -77,7 +107,7 @@ class PbxInstance(Base):
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     name = Column(String(200), unique=True, nullable=False)
     base_url = Column(String(500), nullable=False)
-    tls_policy = Column(String(20), nullable=False, default="verify")
+    tls_policy = Column(tls_policy_enum, nullable=False, default="verify")
     detected_version = Column(String(50))
     detected_build = Column(String(200))
     is_enabled = Column(Boolean, nullable=False, default=True)
@@ -117,7 +147,7 @@ class PbxCapability(Base):
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     pbx_id = Column(UUID(as_uuid=True), ForeignKey("pbx_instance.id", ondelete="CASCADE"), nullable=False)
     feature = Column(String(50), nullable=False)
-    status = Column(String(20), nullable=False, default="untested")
+    status = Column(capability_enum, nullable=False, default="untested")
     method = Column(String(50))
     endpoint_path = Column(String(500))
     response_shape = Column(String(100))
@@ -136,7 +166,7 @@ class TrunkState(Base):
     pbx_id = Column(UUID(as_uuid=True), ForeignKey("pbx_instance.id", ondelete="CASCADE"), nullable=False)
     trunk_name = Column(String(300), nullable=False)
     remote_id = Column(String(200))
-    status = Column(String(20), nullable=False, default="unknown")
+    status = Column(trunk_status_enum, nullable=False, default="unknown")
     last_error = Column(Text)
     last_status_change = Column(DateTime(timezone=True))
     inbound_enabled = Column(Boolean)
@@ -186,7 +216,7 @@ class SbcState(Base):
     pbx_id = Column(UUID(as_uuid=True), ForeignKey("pbx_instance.id", ondelete="CASCADE"), nullable=False)
     sbc_name = Column(String(300), nullable=False)
     remote_id = Column(String(200))
-    status = Column(String(20), nullable=False, default="unknown")
+    status = Column(sbc_status_enum, nullable=False, default="unknown")
     last_seen = Column(DateTime(timezone=True))
     tunnel_status = Column(String(100))
     connection_info = Column(JSONB, default={})
@@ -273,7 +303,7 @@ class AlertRule(Base):
     condition_type = Column(String(50), nullable=False)
     threshold_seconds = Column(Integer)
     threshold_days = Column(Integer)
-    severity = Column(String(20), nullable=False, default="warning")
+    severity = Column(alert_severity_enum, nullable=False, default="warning")
     is_enabled = Column(Boolean, nullable=False, default=True)
     notify_webhook = Column(String(500))
     notify_email = Column(String(255))
@@ -288,7 +318,7 @@ class AlertEvent(Base):
     rule_id = Column(UUID(as_uuid=True), ForeignKey("alert_rule.id", ondelete="CASCADE"), nullable=False)
     pbx_id = Column(UUID(as_uuid=True), ForeignKey("pbx_instance.id", ondelete="CASCADE"), nullable=False)
     state = Column(alert_state_enum, nullable=False, default="firing")
-    severity = Column(String(20), nullable=False)
+    severity = Column(alert_severity_enum, nullable=False)
     title = Column(String(500), nullable=False)
     detail = Column(Text)
     fingerprint = Column(String(200))
