@@ -372,9 +372,8 @@ END $$;
 
 -- ── Seed: default admin user ────────────────────────────────────────────────
 -- Password: "admin" (bcrypt hash) — MUST be changed on first login
--- $2b$12$LJ3m4ys5Rn9JSICqGCOQxeWF10R.tCn7gJBd9B6HuKqWNm0mTviPi = "admin"
 INSERT INTO app_user (username, email, password_hash, role)
-VALUES ('admin', 'admin@localhost', '$2b$12$LJ3m4ys5Rn9JSICqGCOQxeWF10R.tCn7gJBd9B6HuKqWNm0mTviPi', 'admin')
+VALUES ('admin', 'admin@localhost', '$2b$12$1qfGXevIuT1fnMHTN8DjquguXI/pVsF96QJGNIU8hTOAh9kGPwFca', 'admin')
 ON CONFLICT (username) DO NOTHING;
 
 -- ── Seed: default alert rules ───────────────────────────────────────────────
