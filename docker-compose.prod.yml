@@ -19,7 +19,9 @@ version: "3.9"
 services:
   # ── Nginx reverse proxy + SSL ────────────────────────────────
   nginx:
-    image: nginx:1.27-alpine
+    build:
+      context: .
+      dockerfile: deploy/nginx/Dockerfile
     restart: unless-stopped
     ports:
       - "80:80"
