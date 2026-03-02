@@ -3,18 +3,18 @@
 This module encapsulates ALL communication with a 3CX v20 instance.
 Nothing outside this adapter knows how data is fetched from 3CX.
 
+API Strategy:
+    - Primary: 3CX v20 XAPI (OData v4) at /xapi/v1/ — the official API
+    - Fallback: webclient internal API at /webclient/api/
+    - Last resort: HTML scraping (fragile, labeled as such)
+    - Authentication: webclient login or OAuth2 client credentials (Enterprise)
+
 Security:
     - All connections over HTTPS (TLS verification configurable per-PBX)
     - Session cookies held in-memory only, never persisted
     - Passwords passed in, never stored in adapter state
     - Connection timeout enforced on all requests
     - Rate limiting via caller (adapter doesn't auto-poll)
-
-Fragility:
-    - 3CX v20 has NO official public API — we replicate management console calls
-    - Endpoints discovered via probing; may change between minor versions
-    - All parsing is behind try/except with degraded fallbacks
-    - HTML scraping is last resort, clearly labeled "fragile"
 
 Usage:
     adapter = ThreeCXv20Adapter("https://pbx.example.com", verify_tls=True)
@@ -118,6 +118,18 @@ class BackupEntry:
     raw: dict = field(default_factory=dict)
 
 
+@dataclass
+class PhoneNumberData:
+    number: str
+    trunk_name: str
+    display_name: Optional[str] = None
+    number_type: str = "did"
+    is_main: bool = False
+    inbound: Optional[bool] = None
+    outbound: Optional[bool] = None
+    raw: dict = field(default_factory=dict)
+
+
 # ═════════════════════════════════════════════════════════════════════════════
 # ENDPOINT DISCOVERY TABLE
 # ═════════════════════════════════════════════════════════════════════════════
@@ -126,45 +138,41 @@ class BackupEntry:
 # The adapter tries each and remembers which one worked.
 
 LOGIN_ENDPOINTS = [
-    # 3CX v20 webclient API — most common
+    # 3CX v20 webclient/management console login — primary
     ("POST", "/webclient/api/Login/GetAccessToken", "webclient_token"),
-    # 3CX v20 management console API
-    ("POST", "/api/login", "api_login"),
-    # Older/alternate
-    ("POST", "/api/Login/GetAccessToken", "alt_token"),
+    # 3CX v20 OAuth2 client credentials (Enterprise editions)
+    ("POST", "/connect/token", "oauth2_client_credentials"),
 ]
 
 FEATURE_ENDPOINTS = {
     "trunks": [
         ("GET", "/xapi/v1/Trunks",                          "xapi_trunks"),
-        ("GET", "/api/TrunkList",                            "api_trunk_list"),
         ("GET", "/webclient/api/Trunk/Get",                  "webclient_trunks"),
-        ("GET", "/api/SystemStatus",                         "system_status"),
     ],
     "sbcs": [
         ("GET", "/xapi/v1/Sbcs",                             "xapi_sbcs"),
-        ("GET", "/api/SbcList",                              "api_sbc_list"),
         ("GET", "/webclient/api/Sbc/Get",                    "webclient_sbcs"),
     ],
     "license": [
-        ("GET", "/xapi/v1/License",                          "xapi_license"),
-        ("GET", "/api/LicenseInfo",                          "api_license"),
+        ("GET", "/xapi/v1/LicenseInfo",                      "xapi_license_info"),
+        ("GET", "/xapi/v1/LicenseStatus",                    "xapi_license_status"),
         ("GET", "/webclient/api/License/Get",                "webclient_license"),
-        ("GET", "/api/SystemStatus",                         "system_status_lic"),
     ],
     "backup_list": [
         ("GET", "/xapi/v1/Backups",                          "xapi_backups"),
-        ("GET", "/api/BackupList",                           "api_backup_list"),
         ("GET", "/webclient/api/BackupAndRestore/Get",       "webclient_backups"),
     ],
     "backup_download": [
-        ("GET", "/api/BackupAndRestore/download/{id}",       "api_download"),
         ("GET", "/xapi/v1/Backups({id})/$value",             "xapi_download"),
         ("GET", "/webclient/api/BackupAndRestore/Download",  "webclient_download"),
     ],
+    "phone_numbers": [
+        ("GET", "/xapi/v1/Trunks({trunk_id})/PhoneNumbers",  "xapi_trunk_phones"),
+        ("GET", "/xapi/v1/Dids",                              "xapi_dids"),
+        ("GET", "/webclient/api/InboundRule/Get",             "webclient_inbound"),
+    ],
     "version": [
         ("GET", "/xapi/v1/SystemStatus",                     "xapi_status"),
-        ("GET", "/api/SystemStatus",                         "api_status"),
     ],
 }
 
@@ -255,9 +263,18 @@ class ThreeCXv20Adapter:
         for method, path, label in LOGIN_ENDPOINTS:
             t0 = time.monotonic()
             try:
-                # 3CX v20 accepts JSON with Username/Password
-                payload = {"Username": username, "Password": password}
-                resp = await client.request(method, path, json=payload)
+                if label == "oauth2_client_credentials":
+                    # OAuth2 client credentials flow (Enterprise editions)
+                    payload = None
+                    resp = await client.request(method, path, data={
+                        "grant_type": "client_credentials",
+                        "client_id": username,
+                        "client_secret": password,
+                    }, headers={"Content-Type": "application/x-www-form-urlencoded"})
+                else:
+                    # 3CX v20 webclient login — requires SecurityCode field
+                    payload = {"Username": username, "Password": password, "SecurityCode": ""}
+                    resp = await client.request(method, path, json=payload)
                 ms = int((time.monotonic() - t0) * 1000)
 
                 if resp.status_code == 200:
@@ -466,10 +483,9 @@ class ThreeCXv20Adapter:
         client = await self._ensure_client()
 
         trigger_endpoints = [
-            ("POST", "/xapi/v1/Backups/Pbx.StartBackup()", "xapi_trigger"),
-            ("POST", "/api/BackupAndRestore/start", "api_trigger"),
+            # 3CX v20 documented OData action for triggering backup
+            ("POST", "/xapi/v1/Backups/Pbx.Backup", "xapi_trigger"),
             ("POST", "/webclient/api/BackupAndRestore/Post", "webclient_trigger"),
-            ("POST", "/api/backup/start", "api_start"),
         ]
 
         for method, path, label in trigger_endpoints:
@@ -487,6 +503,239 @@ class ThreeCXv20Adapter:
                 continue
 
         return False, "No backup trigger endpoint found — PBX may not support remote trigger"
+
+    # ── 5. PHONE NUMBERS / DIDs ────────────────────────────────────────────
+
+    async def get_phone_numbers(self) -> list[PhoneNumberData]:
+        """Fetch all phone numbers/DIDs across all trunks.
+
+        Tries multiple strategies:
+        1. DID-specific endpoints (xapi/v1/Dids, api/DidList)
+        2. Inbound rule endpoints (often contain DID-to-trunk mappings)
+        3. Per-trunk phone number endpoints (iterates known trunks)
+        """
+        if not self._authenticated:
+            return []
+
+        client = await self._ensure_client()
+        numbers: list[PhoneNumberData] = []
+        seen: set[tuple[str, str]] = set()  # (number, trunk_name) dedup
+
+        # Strategy 1: Try DID-specific endpoints
+        did_endpoints = [
+            ("GET", "/xapi/v1/Dids", "xapi_dids"),
+            ("GET", "/api/DidList", "api_did_list"),
+        ]
+        for method, path, label in did_endpoints:
+            try:
+                resp = await client.request(method, path)
+                if resp.status_code == 200:
+                    data = self._try_json(resp)
+                    if data and self._has_content(data):
+                        items = self._unwrap_list(data, ["value", "list", "List", "Dids"])
+                        for item in items:
+                            pn = self._parse_did(item)
+                            if pn and (pn.number, pn.trunk_name) not in seen:
+                                numbers.append(pn)
+                                seen.add((pn.number, pn.trunk_name))
+                        if numbers:
+                            logger.info(f"Fetched {len(numbers)} DID(s) via {label}")
+                            break
+            except Exception as e:
+                logger.debug(f"DID fetch via {label} failed: {e}")
+
+        # Strategy 2: Try inbound rule endpoints (DIDs mapped to routes)
+        inbound_endpoints = [
+            ("GET", "/api/InboundRuleList", "api_inbound_rules"),
+            ("GET", "/webclient/api/InboundRule/Get", "webclient_inbound"),
+        ]
+        for method, path, label in inbound_endpoints:
+            try:
+                resp = await client.request(method, path)
+                if resp.status_code == 200:
+                    data = self._try_json(resp)
+                    if data and self._has_content(data):
+                        items = self._unwrap_list(data, ["value", "list", "List", "InboundRules"])
+                        for item in items:
+                            pn = self._parse_inbound_rule(item)
+                            if pn and (pn.number, pn.trunk_name) not in seen:
+                                numbers.append(pn)
+                                seen.add((pn.number, pn.trunk_name))
+                        if items:
+                            logger.info(f"Parsed {len(items)} inbound rule(s) via {label}")
+                            break
+            except Exception as e:
+                logger.debug(f"Inbound rule fetch via {label} failed: {e}")
+
+        # Strategy 3: Per-trunk phone numbers (requires known trunk IDs)
+        trunks = await self.get_trunks()
+        for trunk in trunks:
+            if not trunk.remote_id:
+                continue
+            trunk_numbers = await self.get_trunk_phone_numbers(trunk.remote_id, trunk.name)
+            for pn in trunk_numbers:
+                if (pn.number, pn.trunk_name) not in seen:
+                    numbers.append(pn)
+                    seen.add((pn.number, pn.trunk_name))
+
+        logger.info(f"Total phone numbers discovered: {len(numbers)}")
+        return numbers
+
+    async def get_trunk_phone_numbers(
+        self, trunk_id: str, trunk_name: str = "Unknown"
+    ) -> list[PhoneNumberData]:
+        """Fetch phone numbers for a specific trunk by trunk ID."""
+        if not self._authenticated:
+            return []
+
+        client = await self._ensure_client()
+        numbers: list[PhoneNumberData] = []
+
+        # Try the xapi per-trunk endpoint
+        path = f"/xapi/v1/Trunks({trunk_id})/PhoneNumbers"
+        try:
+            resp = await client.request("GET", path)
+            if resp.status_code == 200:
+                data = self._try_json(resp)
+                if data and self._has_content(data):
+                    items = self._unwrap_list(data, ["value", "list", "List", "PhoneNumbers"])
+                    for item in items:
+                        pn = self._parse_phone_number(item, trunk_name)
+                        if pn:
+                            numbers.append(pn)
+                    logger.debug(f"Trunk {trunk_name} ({trunk_id}): {len(numbers)} number(s)")
+        except Exception as e:
+            logger.debug(f"Per-trunk phone number fetch failed for {trunk_id}: {e}")
+
+        return numbers
+
+    def _parse_phone_number(self, item: dict, trunk_name: str = "Unknown") -> Optional[PhoneNumberData]:
+        """Parse a phone number from a trunk PhoneNumbers response."""
+        try:
+            number = (
+                item.get("Number") or item.get("number") or
+                item.get("PhoneNumber") or item.get("phoneNumber") or
+                item.get("Did") or item.get("did") or ""
+            ).strip()
+
+            if not number:
+                return None
+
+            display_name = (
+                item.get("DisplayName") or item.get("displayName") or
+                item.get("Name") or item.get("name") or
+                item.get("Label") or item.get("label")
+            )
+
+            is_main = bool(
+                item.get("IsMainNumber") or item.get("isMainNumber") or
+                item.get("IsMain") or item.get("isMain") or False
+            )
+
+            number_type = (
+                item.get("Type") or item.get("type") or
+                item.get("NumberType") or item.get("numberType") or "did"
+            ).lower()
+            # Normalize type
+            if number_type not in ("did", "main", "fax", "sip", "tollfree", "local", "international"):
+                number_type = "did"
+
+            return PhoneNumberData(
+                number=number,
+                trunk_name=trunk_name,
+                display_name=display_name,
+                number_type="main" if is_main else number_type,
+                is_main=is_main,
+                inbound=self._to_bool(item, "InboundEnabled", "inboundEnabled", "Inbound", "inbound"),
+                outbound=self._to_bool(item, "OutboundEnabled", "outboundEnabled", "Outbound", "outbound"),
+                raw=item,
+            )
+        except Exception as e:
+            logger.debug(f"Failed to parse phone number: {e}")
+            return None
+
+    def _parse_did(self, item: dict) -> Optional[PhoneNumberData]:
+        """Parse a DID entry from the Dids or DidList endpoint."""
+        try:
+            number = (
+                item.get("Did") or item.get("did") or
+                item.get("Number") or item.get("number") or
+                item.get("PhoneNumber") or item.get("phoneNumber") or ""
+            ).strip()
+
+            if not number:
+                return None
+
+            trunk_name = (
+                item.get("TrunkName") or item.get("trunkName") or
+                item.get("Trunk") or item.get("trunk") or
+                item.get("ProviderName") or item.get("providerName") or
+                "Unknown"
+            )
+
+            display_name = (
+                item.get("DisplayName") or item.get("displayName") or
+                item.get("Name") or item.get("name") or
+                item.get("Label") or item.get("label")
+            )
+
+            return PhoneNumberData(
+                number=number,
+                trunk_name=trunk_name,
+                display_name=display_name,
+                number_type="did",
+                is_main=bool(item.get("IsMainNumber") or item.get("isMainNumber") or False),
+                inbound=self._to_bool(item, "InboundEnabled", "inboundEnabled"),
+                outbound=self._to_bool(item, "OutboundEnabled", "outboundEnabled"),
+                raw=item,
+            )
+        except Exception as e:
+            logger.debug(f"Failed to parse DID: {e}")
+            return None
+
+    def _parse_inbound_rule(self, item: dict) -> Optional[PhoneNumberData]:
+        """Parse a phone number from an inbound rule entry.
+
+        Inbound rules in 3CX map external DIDs to internal destinations.
+        The DID/CallerID field contains the phone number.
+        """
+        try:
+            number = (
+                item.get("Did") or item.get("did") or
+                item.get("Number") or item.get("number") or
+                item.get("CallerID") or item.get("callerId") or
+                item.get("ExternalNumber") or item.get("externalNumber") or ""
+            ).strip()
+
+            if not number:
+                return None
+
+            trunk_name = (
+                item.get("TrunkName") or item.get("trunkName") or
+                item.get("Trunk") or item.get("trunk") or
+                item.get("Provider") or item.get("provider") or
+                "Unknown"
+            )
+
+            display_name = (
+                item.get("Name") or item.get("name") or
+                item.get("RuleName") or item.get("ruleName") or
+                item.get("DisplayName") or item.get("displayName")
+            )
+
+            return PhoneNumberData(
+                number=number,
+                trunk_name=trunk_name,
+                display_name=display_name,
+                number_type="did",
+                is_main=False,
+                inbound=True,  # Inbound rules imply inbound is enabled
+                outbound=None,
+                raw=item,
+            )
+        except Exception as e:
+            logger.debug(f"Failed to parse inbound rule: {e}")
+            return None
 
     # ── INTERNAL HELPERS ────────────────────────────────────────────────────
 
@@ -506,7 +755,7 @@ class ThreeCXv20Adapter:
                         return self._try_json(resp)
                     elif "html" in ct:
                         return self._scrape_html(resp.text, feature)
-                elif resp.status_code in (401, 403):
+                if resp.status_code in (401, 403):
                     self._authenticated = False
                     logger.warning(f"Session expired fetching {feature}")
                     return None
@@ -558,17 +807,36 @@ class ThreeCXv20Adapter:
 
     @staticmethod
     def _extract_token(data: dict) -> Optional[str]:
-        """Extract bearer token from various 3CX response formats."""
+        """Extract bearer token from various 3CX response formats.
+
+        3CX v20 webclient login returns:
+            {"Status": "AuthSuccess", "Token": {"access_token": "...", ...}}
+        OAuth2 client_credentials returns:
+            {"access_token": "...", "token_type": "Bearer", ...}
+        """
         if isinstance(data, str):
             return data if len(data) > 20 else None
 
-        for key in ("Token", "token", "access_token", "AccessToken"):
-            val = data.get(key)
-            if val:
-                if isinstance(val, str) and len(val) > 10:
-                    return val
-                if isinstance(val, dict):
-                    return val.get("token") or val.get("value")
+        # Check top-level access_token first (OAuth2 response)
+        if isinstance(data.get("access_token"), str) and len(data["access_token"]) > 10:
+            return data["access_token"]
+
+        # Check Token field (webclient login response)
+        token_val = data.get("Token") or data.get("token")
+        if token_val:
+            if isinstance(token_val, dict):
+                # 3CX v20: {"Token": {"access_token": "jwt...", "token_type": "Bearer"}}
+                inner = token_val.get("access_token") or token_val.get("token") or token_val.get("value")
+                if isinstance(inner, str) and len(inner) > 10:
+                    return inner
+            elif isinstance(token_val, str) and len(token_val) > 10:
+                return token_val
+
+        # Fallback: AccessToken key
+        at = data.get("AccessToken")
+        if isinstance(at, str) and len(at) > 10:
+            return at
+
         return None
 
     def _parse_trunk(self, item: dict) -> TrunkData:

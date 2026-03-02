@@ -29,6 +29,7 @@ from src.core.encryption import decrypt_password, encrypt_password, EncryptedBlo
 from src.models.models import (
     PbxInstance, PbxCredential, BackupRecord, BackupSchedule, AuditLog,
 )
+from src.services.event_log_service import log_event, log_error
 
 logger = logging.getLogger("pbxmonitorx.backup")
 
@@ -198,6 +199,20 @@ async def pull_latest_backup(db: AsyncSession, pbx_id: UUID) -> dict:
         ))
         await db.commit()
 
+        # Send backup success notification
+        try:
+            from src.services.notification_service import notify_backup_event
+            await notify_backup_event(db, pbx, "backup_success", {
+                "filename": target.filename, "size_bytes": file_size,
+            })
+        except Exception as e:
+            logger.warning(f"Backup notification failed: {e}")
+
+        await log_event(db, "backup", "backup_downloaded",
+                        f"Backup {target.filename} downloaded ({file_size} bytes) in {duration_ms}ms",
+                        pbx_id=pbx.id, pbx_name=pbx.name, duration_ms=duration_ms,
+                        detail={"filename": target.filename, "size_bytes": file_size, "sha256": hash_or_error})
+
         logger.info(f"Backup {target.filename} downloaded ({file_size} bytes) in {duration_ms}ms")
         return {
             "success": True,
@@ -209,6 +224,14 @@ async def pull_latest_backup(db: AsyncSession, pbx_id: UUID) -> dict:
 
     except Exception as e:
         logger.exception(f"Backup pull failed for {pbx.name}")
+        await log_error(db, "backup", "backup_pull_failed", f"Backup pull failed for {pbx.name}: {e}",
+                        error=e, pbx_id=pbx.id, pbx_name=pbx.name)
+        # Send backup failure notification
+        try:
+            from src.services.notification_service import notify_backup_event
+            await notify_backup_event(db, pbx, "backup_failed", {"error": str(e)})
+        except Exception as exc:
+            logger.warning(f"Backup failure notification failed: {exc}")
         return {"success": False, "error": str(e)}
     finally:
         await adapter.close()

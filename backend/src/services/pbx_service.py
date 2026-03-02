@@ -192,20 +192,45 @@ class PbxService:
     # ── LIST INSTANCES ───────────────────────────────────────────────────
 
     @staticmethod
-    async def list_instances(db: AsyncSession) -> list[dict]:
-        result = await db.execute(
-            select(PbxInstance).order_by(PbxInstance.name)
-        )
+    async def list_instances(
+        db: AsyncSession, search: str = None, is_enabled: bool = None,
+        page: int = 1, per_page: int = 50,
+    ) -> dict:
+        """List PBX instances with pagination and search."""
+        from sqlalchemy import func
+
+        q = select(PbxInstance)
+        count_q = select(func.count(PbxInstance.id))
+
+        if search:
+            pattern = f"%{search}%"
+            q = q.where(PbxInstance.name.ilike(pattern) | PbxInstance.base_url.ilike(pattern))
+            count_q = count_q.where(PbxInstance.name.ilike(pattern) | PbxInstance.base_url.ilike(pattern))
+        if is_enabled is not None:
+            q = q.where(PbxInstance.is_enabled == is_enabled)
+            count_q = count_q.where(PbxInstance.is_enabled == is_enabled)
+
+        total_result = await db.execute(count_q)
+        total = total_result.scalar()
+
+        q = q.order_by(PbxInstance.name).offset((page - 1) * per_page).limit(per_page)
+        result = await db.execute(q)
         instances = result.scalars().all()
+
+        # Batch load credential usernames
+        if instances:
+            pbx_ids = [pbx.id for pbx in instances]
+            cred_result = await db.execute(
+                select(PbxCredential.pbx_id, PbxCredential.username).where(
+                    PbxCredential.pbx_id.in_(pbx_ids)
+                )
+            )
+            cred_map = {row.pbx_id: row.username for row in cred_result.all()}
+        else:
+            cred_map = {}
 
         output = []
         for pbx in instances:
-            # Get credential username (not password!)
-            cred_result = await db.execute(
-                select(PbxCredential.username).where(PbxCredential.pbx_id == pbx.id)
-            )
-            cred_username = cred_result.scalar_one_or_none()
-
             output.append({
                 "id": str(pbx.id),
                 "name": pbx.name,
@@ -220,10 +245,117 @@ class PbxService:
                 "consecutive_failures": pbx.consecutive_failures,
                 "notes": pbx.notes,
                 "created_at": pbx.created_at.isoformat() if pbx.created_at else None,
-                "credential_username": cred_username,
+                "credential_username": cred_map.get(pbx.id),
             })
 
-        return output
+        return {
+            "instances": output,
+            "total": total,
+            "page": page,
+            "per_page": per_page,
+            "pages": (total + per_page - 1) // per_page,
+        }
+
+    @staticmethod
+    async def get_dashboard_summary(db: AsyncSession) -> dict:
+        """Aggregated dashboard data optimized for 100+ PBXes."""
+        from sqlalchemy import func, case
+
+        # PBX counts
+        pbx_result = await db.execute(
+            select(
+                func.count(PbxInstance.id).label("total"),
+                func.count(case((PbxInstance.is_enabled == True, 1))).label("enabled"),
+                func.count(case((PbxInstance.consecutive_failures > 3, 1))).label("error_count"),
+            )
+        )
+        pbx_stats = pbx_result.one()
+
+        # Trunk stats
+        trunk_result = await db.execute(
+            select(
+                func.count(TrunkState.id).label("total"),
+                func.count(case((TrunkState.status == "registered", 1))).label("registered"),
+                func.count(case((TrunkState.status.in_(["unregistered", "error"]), 1))).label("down"),
+            )
+        )
+        trunk_stats = trunk_result.one()
+
+        # SBC stats
+        sbc_result = await db.execute(
+            select(
+                func.count(SbcState.id).label("total"),
+                func.count(case((SbcState.status == "online", 1))).label("online"),
+                func.count(case((SbcState.status == "offline", 1))).label("offline"),
+            )
+        )
+        sbc_stats = sbc_result.one()
+
+        # Alert counts
+        from src.models.models import AlertEvent
+        alert_result = await db.execute(
+            select(
+                func.count(case((AlertEvent.state == "firing", 1))).label("firing"),
+                func.count(case((AlertEvent.state == "acknowledged", 1))).label("acknowledged"),
+            )
+        )
+        alert_stats = alert_result.one()
+
+        # Backup stats
+        from src.models.models import BackupRecord
+        backup_result = await db.execute(
+            select(
+                func.count(BackupRecord.id).label("total"),
+                func.sum(BackupRecord.size_bytes).label("total_bytes"),
+            ).where(BackupRecord.is_downloaded == True)
+        )
+        backup_stats = backup_result.one()
+
+        # Recent problem PBXes (for quick overview)
+        problem_result = await db.execute(
+            select(PbxInstance).where(
+                (PbxInstance.consecutive_failures > 0) & (PbxInstance.is_enabled == True)
+            ).order_by(PbxInstance.consecutive_failures.desc()).limit(10)
+        )
+        problem_pbxes = [
+            {"id": str(p.id), "name": p.name, "failures": p.consecutive_failures, "error": p.last_error}
+            for p in problem_result.scalars().all()
+        ]
+
+        return {
+            "pbx": {"total": pbx_stats.total, "enabled": pbx_stats.enabled, "errors": pbx_stats.error_count},
+            "trunks": {"total": trunk_stats.total, "registered": trunk_stats.registered, "down": trunk_stats.down},
+            "sbcs": {"total": sbc_stats.total, "online": sbc_stats.online, "offline": sbc_stats.offline},
+            "alerts": {"firing": alert_stats.firing, "acknowledged": alert_stats.acknowledged},
+            "backups": {"total": backup_stats.total or 0, "total_bytes": backup_stats.total_bytes or 0},
+            "problem_pbxes": problem_pbxes,
+        }
+
+    @staticmethod
+    async def list_all_sbcs(db: AsyncSession, status_filter: str = None) -> list[dict]:
+        """List all SBCs across all PBXes with their PBX name."""
+        q = select(SbcState, PbxInstance.name.label("pbx_name")).join(
+            PbxInstance, SbcState.pbx_id == PbxInstance.id
+        )
+        if status_filter:
+            q = q.where(SbcState.status == status_filter)
+        q = q.order_by(PbxInstance.name, SbcState.sbc_name)
+
+        result = await db.execute(q)
+        return [
+            {
+                "id": str(row.SbcState.id),
+                "pbx_id": str(row.SbcState.pbx_id),
+                "pbx_name": row.pbx_name,
+                "sbc_name": row.SbcState.sbc_name,
+                "status": row.SbcState.status,
+                "tunnel_status": row.SbcState.tunnel_status,
+                "last_seen": row.SbcState.last_seen.isoformat() if row.SbcState.last_seen else None,
+                "connection_info": row.SbcState.connection_info or {},
+                "extra_data": row.SbcState.extra_data or {},
+            }
+            for row in result.all()
+        ]
 
     # ── GET INSTANCE + STATUS ────────────────────────────────────────────
 

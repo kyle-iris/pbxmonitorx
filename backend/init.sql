@@ -47,7 +47,10 @@ DO $$ BEGIN
         'alert_rule_created', 'alert_rule_updated', 'alert_rule_deleted',
         'alert_acknowledged', 'alert_resolved',
         'config_changed', 'poll_completed', 'poll_failed',
-        'session_expired', 'capability_probe'
+        'session_expired', 'capability_probe',
+        'sso_login', 'sso_login_failed', 'user_sso_login', 'user_sso_created',
+        'user_deactivated', 'user_password_reset',
+        'phone_numbers_synced', 'report_generated', 'backup_bulk_pull'
     );
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
@@ -57,8 +60,12 @@ CREATE TABLE IF NOT EXISTS app_user (
     id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     username          VARCHAR(100) NOT NULL,
     email             VARCHAR(255),
-    password_hash     VARCHAR(255) NOT NULL,     -- bcrypt, never plaintext
+    password_hash     VARCHAR(255),               -- bcrypt, never plaintext; NULL for SSO-only users
     role              user_role_t NOT NULL DEFAULT 'viewer',
+    auth_method       VARCHAR(20) NOT NULL DEFAULT 'local',  -- 'local' or 'azure_ad'
+    azure_oid         VARCHAR(100),               -- Azure AD Object ID
+    display_name      VARCHAR(200),               -- Full name from Azure AD
+    last_sso_sync     TIMESTAMPTZ,               -- Last Azure AD sync timestamp
     is_active         BOOLEAN NOT NULL DEFAULT true,
     failed_login_count INT NOT NULL DEFAULT 0,
     locked_until      TIMESTAMPTZ,               -- NULL = not locked
@@ -71,6 +78,10 @@ CREATE TABLE IF NOT EXISTS app_user (
     CONSTRAINT ck_app_user_username_len CHECK (char_length(username) >= 3),
     CONSTRAINT ck_app_user_role CHECK (role IN ('viewer', 'operator', 'admin'))
 );
+
+-- Azure OID must be unique when not null (partial unique index)
+CREATE UNIQUE INDEX IF NOT EXISTS idx_app_user_azure_oid
+    ON app_user (azure_oid) WHERE azure_oid IS NOT NULL;
 
 -- ── PBX Instances ───────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS pbx_instance (
@@ -148,6 +159,30 @@ CREATE TABLE IF NOT EXISTS trunk_state (
 
     CONSTRAINT uq_trunk_state UNIQUE (pbx_id, trunk_name)
 );
+
+-- ── Trunk Phone Numbers (DIDs per trunk) ────────────────────────────────────
+CREATE TABLE IF NOT EXISTS trunk_phone_number (
+    id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    pbx_id            UUID NOT NULL REFERENCES pbx_instance(id) ON DELETE CASCADE,
+    trunk_id          UUID REFERENCES trunk_state(id) ON DELETE SET NULL,
+    trunk_name        VARCHAR(300) NOT NULL,
+    phone_number      VARCHAR(50) NOT NULL,
+    display_name      VARCHAR(200),
+    number_type       VARCHAR(30) DEFAULT 'did',  -- did, tollfree, international, internal
+    is_main_number    BOOLEAN DEFAULT false,
+    inbound_enabled   BOOLEAN DEFAULT true,
+    outbound_enabled  BOOLEAN DEFAULT true,
+    description       TEXT,
+    extra_data        JSONB DEFAULT '{}',
+    last_seen_at      TIMESTAMPTZ,
+    created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+
+    CONSTRAINT uq_phone_pbx UNIQUE (pbx_id, phone_number)
+);
+CREATE INDEX IF NOT EXISTS idx_phone_pbx ON trunk_phone_number (pbx_id);
+CREATE INDEX IF NOT EXISTS idx_phone_trunk ON trunk_phone_number (trunk_name);
+CREATE INDEX IF NOT EXISTS idx_phone_number ON trunk_phone_number (phone_number);
 
 -- ── SBC State (current snapshot) ────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS sbc_state (
@@ -323,7 +358,7 @@ DECLARE
 BEGIN
     FOR tbl IN SELECT unnest(ARRAY[
         'app_user', 'pbx_instance', 'pbx_credential',
-        'backup_schedule', 'alert_rule'
+        'backup_schedule', 'alert_rule', 'trunk_phone_number'
     ])
     LOOP
         EXECUTE format(
@@ -353,6 +388,132 @@ ON CONFLICT DO NOTHING;
 
 -- Set threshold_days for the license rule
 UPDATE alert_rule SET threshold_days = 30 WHERE condition_type = 'license_expiring' AND threshold_days IS NULL;
+
+-- ── Migration helpers for existing databases ────────────────────────────────
+-- These ALTER statements are idempotent so the script can be re-run safely.
+
+-- SSO fields on app_user (for databases created before SSO support)
+ALTER TABLE app_user ADD COLUMN IF NOT EXISTS auth_method VARCHAR(20) NOT NULL DEFAULT 'local';
+ALTER TABLE app_user ADD COLUMN IF NOT EXISTS azure_oid VARCHAR(100);
+ALTER TABLE app_user ADD COLUMN IF NOT EXISTS display_name VARCHAR(200);
+ALTER TABLE app_user ADD COLUMN IF NOT EXISTS last_sso_sync TIMESTAMPTZ;
+
+-- Make password_hash nullable for SSO-only users (for databases created before SSO)
+ALTER TABLE app_user ALTER COLUMN password_hash DROP NOT NULL;
+
+-- New audit actions (for databases where the enum was created before these values)
+ALTER TYPE audit_action_t ADD VALUE IF NOT EXISTS 'sso_login';
+ALTER TYPE audit_action_t ADD VALUE IF NOT EXISTS 'sso_login_failed';
+ALTER TYPE audit_action_t ADD VALUE IF NOT EXISTS 'user_sso_login';
+ALTER TYPE audit_action_t ADD VALUE IF NOT EXISTS 'user_sso_created';
+ALTER TYPE audit_action_t ADD VALUE IF NOT EXISTS 'user_deactivated';
+ALTER TYPE audit_action_t ADD VALUE IF NOT EXISTS 'user_password_reset';
+ALTER TYPE audit_action_t ADD VALUE IF NOT EXISTS 'phone_numbers_synced';
+ALTER TYPE audit_action_t ADD VALUE IF NOT EXISTS 'report_generated';
+ALTER TYPE audit_action_t ADD VALUE IF NOT EXISTS 'backup_bulk_pull';
+
+-- New audit actions for settings & notifications
+ALTER TYPE audit_action_t ADD VALUE IF NOT EXISTS 'settings_updated';
+ALTER TYPE audit_action_t ADD VALUE IF NOT EXISTS 'notification_sent';
+ALTER TYPE audit_action_t ADD VALUE IF NOT EXISTS 'notification_channel_created';
+ALTER TYPE audit_action_t ADD VALUE IF NOT EXISTS 'notification_channel_updated';
+ALTER TYPE audit_action_t ADD VALUE IF NOT EXISTS 'notification_channel_deleted';
+
+-- ── System Settings (key-value store) ─────────────────────────────────────
+CREATE TABLE IF NOT EXISTS system_setting (
+    key VARCHAR(100) PRIMARY KEY,
+    value JSONB NOT NULL DEFAULT '{}',
+    category VARCHAR(50) NOT NULL DEFAULT 'general',  -- general, branding, notifications, backup, integrations
+    description TEXT,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_by UUID REFERENCES app_user(id) ON DELETE SET NULL
+);
+
+-- ── Notification Channels ─────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS notification_channel (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    name VARCHAR(200) NOT NULL,
+    channel_type VARCHAR(50) NOT NULL,  -- 'email', 'webhook', 'halopsa'
+    config JSONB NOT NULL DEFAULT '{}',  -- {smtp_host, smtp_port, smtp_user, smtp_pass_encrypted, from_addr, to_addrs[]} for email; {url, headers, method} for webhook
+    is_enabled BOOLEAN NOT NULL DEFAULT true,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- ── Notification Log ──────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS notification_log (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    channel_id UUID REFERENCES notification_channel(id) ON DELETE SET NULL,
+    alert_event_id UUID REFERENCES alert_event(id) ON DELETE SET NULL,
+    notification_type VARCHAR(50) NOT NULL,  -- 'alert_fired', 'alert_resolved', 'backup_failed', 'backup_success', 'sbc_offline', 'trunk_down'
+    subject VARCHAR(500),
+    body TEXT,
+    recipient VARCHAR(500),
+    success BOOLEAN NOT NULL DEFAULT true,
+    error_message TEXT,
+    sent_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_notification_log_time ON notification_log (sent_at DESC);
+CREATE INDEX IF NOT EXISTS idx_notification_log_channel ON notification_log (channel_id);
+
+-- ── Seed: default system settings ─────────────────────────────────────────
+INSERT INTO system_setting (key, value, category, description) VALUES
+    ('branding.company_name', '"PBXMonitorX"', 'branding', 'Company name shown in header and login'),
+    ('branding.logo_url', '""', 'branding', 'URL or base64 data for custom logo'),
+    ('branding.primary_color', '"#C8965A"', 'branding', 'Primary accent color (hex)'),
+    ('branding.dark_mode', 'true', 'branding', 'Enable dark mode theme'),
+    ('branding.favicon_url', '""', 'branding', 'Custom favicon URL'),
+    ('backup.default_storage_path', '"/data/backups"', 'backup', 'Default local storage path for backups'),
+    ('backup.storage_type', '"local"', 'backup', 'Storage backend: local, s3, sftp'),
+    ('backup.s3_bucket', '""', 'backup', 'S3 bucket name for remote backup storage'),
+    ('backup.s3_region', '""', 'backup', 'S3 region'),
+    ('backup.s3_access_key', '""', 'backup', 'S3 access key'),
+    ('backup.s3_secret_key_encrypted', '""', 'backup', 'S3 secret key (encrypted)'),
+    ('backup.sftp_host', '""', 'backup', 'SFTP host for remote backup storage'),
+    ('backup.sftp_port', '22', 'backup', 'SFTP port'),
+    ('backup.sftp_user', '""', 'backup', 'SFTP username'),
+    ('backup.sftp_path', '""', 'backup', 'Remote path on SFTP server'),
+    ('backup.default_retain_count', '10', 'backup', 'Default number of backups to retain per PBX'),
+    ('backup.default_retain_days', '30', 'backup', 'Default days to retain backups'),
+    ('backup.default_encrypt_at_rest', 'false', 'backup', 'Encrypt backups at rest by default'),
+    ('notifications.enabled', 'false', 'notifications', 'Enable notification system'),
+    ('notifications.alert_on_trunk_down', 'true', 'notifications', 'Notify when trunk goes down'),
+    ('notifications.alert_on_sbc_offline', 'true', 'notifications', 'Notify when SBC goes offline'),
+    ('notifications.alert_on_backup_fail', 'true', 'notifications', 'Notify when backup fails'),
+    ('notifications.alert_on_backup_success', 'false', 'notifications', 'Notify on successful backup'),
+    ('notifications.alert_on_license_expiring', 'true', 'notifications', 'Notify when license is expiring'),
+    ('notifications.alert_on_pbx_unreachable', 'true', 'notifications', 'Notify when PBX is unreachable'),
+    ('integrations.halopsa_enabled', 'false', 'integrations', 'Enable HaloPSA integration'),
+    ('integrations.halopsa_api_url', '""', 'integrations', 'HaloPSA API base URL'),
+    ('integrations.halopsa_client_id', '""', 'integrations', 'HaloPSA OAuth client ID'),
+    ('integrations.halopsa_client_secret_encrypted', '""', 'integrations', 'HaloPSA OAuth client secret (encrypted)'),
+    ('integrations.halopsa_ticket_type_id', '0', 'integrations', 'Default ticket type ID in HaloPSA'),
+    ('integrations.halopsa_agent_id', '0', 'integrations', 'Default agent/team ID in HaloPSA')
+ON CONFLICT (key) DO NOTHING;
+
+-- ── Event Log (tool-level operational logging for troubleshooting) ──────────
+CREATE TABLE IF NOT EXISTS event_log (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    timestamp TIMESTAMPTZ NOT NULL DEFAULT now(),
+    level VARCHAR(20) NOT NULL DEFAULT 'info',      -- debug, info, warning, error, critical
+    source VARCHAR(100) NOT NULL,                    -- polling, backup, alert, adapter, notification, auth, system
+    pbx_id UUID REFERENCES pbx_instance(id) ON DELETE SET NULL,
+    pbx_name VARCHAR(200),                           -- denormalized for when PBX is deleted
+    event_type VARCHAR(100) NOT NULL,                -- poll_started, poll_completed, poll_failed, login_attempt, etc.
+    message TEXT NOT NULL,
+    detail JSONB DEFAULT '{}',                       -- structured data (error traces, durations, etc.)
+    duration_ms INT,                                 -- how long the operation took
+    error_trace TEXT,                                -- full stack trace for errors
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_event_log_time ON event_log (timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_event_log_level ON event_log (level, timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_event_log_source ON event_log (source, timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_event_log_pbx ON event_log (pbx_id, timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_event_log_type ON event_log (event_type);
+
+-- Auto-cleanup: event_log should be pruned periodically (implement via retention task)
+-- Default retention: 7 days for debug, 30 days for info, 90 days for warning+
 
 -- ============================================================================
 -- VERIFICATION: List all tables

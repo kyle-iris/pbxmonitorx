@@ -30,6 +30,7 @@ from src.models.models import (
     PbxInstance, PbxCredential, TrunkState, SbcState,
     LicenseState, PollResult, AuditLog,
 )
+from src.services.event_log_service import log_event, log_error
 
 logger = logging.getLogger("pbxmonitorx.polling")
 
@@ -46,6 +47,9 @@ async def poll_single_instance(db: AsyncSession, pbx_id: UUID) -> dict:
     pbx = result.scalar_one_or_none()
     if not pbx or not pbx.is_enabled:
         return {"success": False, "error": "PBX not found or disabled"}
+
+    await log_event(db, "polling", "poll_started", f"Starting poll for {pbx.name}",
+                    level="debug", pbx_id=pbx.id, pbx_name=pbx.name)
 
     cred_result = await db.execute(select(PbxCredential).where(PbxCredential.pbx_id == pbx_id))
     cred = cred_result.scalar_one_or_none()
@@ -122,6 +126,11 @@ async def poll_single_instance(db: AsyncSession, pbx_id: UUID) -> dict:
 
         await db.commit()
 
+        await log_event(db, "polling", "poll_completed",
+                        f"Poll {pbx.name}: OK in {duration_ms}ms — {diff_summary}",
+                        pbx_id=pbx.id, pbx_name=pbx.name, duration_ms=duration_ms,
+                        detail={"trunks": len(trunks), "sbcs": len(sbcs), "changes": diff_parts})
+
         logger.info(f"Poll {pbx.name}: OK in {duration_ms}ms — {diff_summary}")
         return {
             "success": True,
@@ -134,6 +143,9 @@ async def poll_single_instance(db: AsyncSession, pbx_id: UUID) -> dict:
 
     except Exception as e:
         logger.exception(f"Poll failed for {pbx.name}")
+        await log_error(db, "polling", "poll_failed", f"Poll failed for {pbx.name}: {e}",
+                        error=e, pbx_id=pbx.id, pbx_name=pbx.name,
+                        duration_ms=int((time.monotonic() - t0) * 1000))
         await _record_failure(db, pbx, str(e), int((time.monotonic() - t0) * 1000))
         return {"success": False, "error": str(e)}
 
@@ -142,13 +154,11 @@ async def poll_single_instance(db: AsyncSession, pbx_id: UUID) -> dict:
 
 
 async def poll_all_due_instances(db: AsyncSession) -> list[dict]:
-    """Find all PBX instances that are due for polling and poll them.
+    """Poll all due PBX instances with concurrent batches.
 
-    A PBX is "due" if:
-      - it's enabled
-      - last_poll_at is NULL, OR
-      - now - last_poll_at >= poll_interval_s (with backoff for failures)
+    Uses asyncio.gather in batches of 10 for scalability with 100+ instances.
     """
+    import asyncio
     now = datetime.now(timezone.utc)
 
     result = await db.execute(
@@ -156,12 +166,24 @@ async def poll_all_due_instances(db: AsyncSession) -> list[dict]:
     )
     instances = result.scalars().all()
 
+    due = [pbx for pbx in instances if _is_poll_due(pbx, now)]
+    if not due:
+        return []
+
     results = []
-    for pbx in instances:
-        if _is_poll_due(pbx, now):
-            # Poll in sequence per instance (don't hammer)
-            r = await poll_single_instance(db, pbx.id)
-            results.append(r)
+    batch_size = 10  # Poll 10 concurrently
+
+    for i in range(0, len(due), batch_size):
+        batch = due[i:i + batch_size]
+        batch_results = await asyncio.gather(
+            *[poll_single_instance(db, pbx.id) for pbx in batch],
+            return_exceptions=True,
+        )
+        for r in batch_results:
+            if isinstance(r, Exception):
+                results.append({"success": False, "error": str(r)})
+            else:
+                results.append(r)
 
     return results
 

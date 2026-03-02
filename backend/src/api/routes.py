@@ -140,9 +140,32 @@ async def create_instance(request: Request, db: AsyncSession = Depends(get_db)):
 
 
 @router.get("/pbx/instances")
-async def list_instances(db: AsyncSession = Depends(get_db)):
-    """List all PBX instances. Never returns passwords."""
-    return await PbxService.list_instances(db)
+async def list_instances(
+    search: Optional[str] = Query(None),
+    is_enabled: Optional[bool] = Query(None),
+    page: int = Query(1, ge=1),
+    per_page: int = Query(50, ge=10, le=200),
+    db: AsyncSession = Depends(get_db),
+):
+    """List all PBX instances with pagination. Never returns passwords."""
+    return await PbxService.list_instances(
+        db, search=search, is_enabled=is_enabled, page=page, per_page=per_page
+    )
+
+
+@router.get("/pbx/dashboard-summary")
+async def dashboard_summary(db: AsyncSession = Depends(get_db)):
+    """Aggregated dashboard data — optimized single query for 100+ PBXes."""
+    return await PbxService.get_dashboard_summary(db)
+
+
+@router.get("/sbcs")
+async def list_all_sbcs(
+    status: Optional[str] = Query(None),
+    db: AsyncSession = Depends(get_db),
+):
+    """List all SBCs across all PBX instances."""
+    return await PbxService.list_all_sbcs(db, status_filter=status)
 
 
 @router.get("/pbx/instances/{pbx_id}/status")

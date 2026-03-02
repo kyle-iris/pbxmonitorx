@@ -6,7 +6,7 @@ from typing import Optional
 
 from sqlalchemy import (
     Boolean, Column, DateTime, Date, Enum, ForeignKey, Integer,
-    LargeBinary, String, Text, BigInteger, ARRAY,
+    LargeBinary, String, Text, BigInteger, ARRAY, Index,
     text, UniqueConstraint, CheckConstraint,
 )
 from sqlalchemy.dialects.postgresql import UUID, JSONB, INET
@@ -23,14 +23,27 @@ class AppUser(Base):
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     username = Column(String(100), unique=True, nullable=False)
     email = Column(String(255), unique=True)
-    password_hash = Column(String(255), nullable=False)
+    password_hash = Column(String(255), nullable=True)       # NULL for SSO-only users
     role = Column(String(20), nullable=False, default="viewer")
+    auth_method = Column(String(20), nullable=False, default="local")  # 'local' or 'azure_ad'
+    azure_oid = Column(String(100))                          # Azure AD Object ID
+    display_name = Column(String(200))                       # Full name from Azure AD
+    last_sso_sync = Column(DateTime(timezone=True))           # Last Azure AD sync timestamp
     is_active = Column(Boolean, nullable=False, default=True)
     failed_login_count = Column(Integer, nullable=False, default=0)
     locked_until = Column(DateTime(timezone=True))
     last_login = Column(DateTime(timezone=True))
     created_at = Column(DateTime(timezone=True), server_default=text("now()"))
     updated_at = Column(DateTime(timezone=True), server_default=text("now()"))
+
+    __table_args__ = (
+        Index(
+            "idx_app_user_azure_oid",
+            "azure_oid",
+            unique=True,
+            postgresql_where=text("azure_oid IS NOT NULL"),
+        ),
+    )
 
 
 class PbxInstance(Base):
@@ -107,7 +120,38 @@ class TrunkState(Base):
     extra_data = Column(JSONB, default={})
     updated_at = Column(DateTime(timezone=True), server_default=text("now()"))
 
+    phone_numbers = relationship("TrunkPhoneNumber", back_populates="trunk", cascade="all, delete-orphan")
+
     __table_args__ = (UniqueConstraint("pbx_id", "trunk_name"),)
+
+
+class TrunkPhoneNumber(Base):
+    __tablename__ = "trunk_phone_number"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    pbx_id = Column(UUID(as_uuid=True), ForeignKey("pbx_instance.id", ondelete="CASCADE"), nullable=False)
+    trunk_id = Column(UUID(as_uuid=True), ForeignKey("trunk_state.id", ondelete="SET NULL"))
+    trunk_name = Column(String(300), nullable=False)
+    phone_number = Column(String(50), nullable=False)
+    display_name = Column(String(200))
+    number_type = Column(String(30), default="did")        # did, tollfree, international, internal
+    is_main_number = Column(Boolean, default=False)
+    inbound_enabled = Column(Boolean, default=True)
+    outbound_enabled = Column(Boolean, default=True)
+    description = Column(Text)
+    extra_data = Column(JSONB, default={})
+    last_seen_at = Column(DateTime(timezone=True))
+    created_at = Column(DateTime(timezone=True), server_default=text("now()"))
+    updated_at = Column(DateTime(timezone=True), server_default=text("now()"))
+
+    trunk = relationship("TrunkState", back_populates="phone_numbers")
+
+    __table_args__ = (
+        UniqueConstraint("pbx_id", "phone_number", name="uq_phone_pbx"),
+        Index("idx_phone_pbx", "pbx_id"),
+        Index("idx_phone_trunk", "trunk_name"),
+        Index("idx_phone_number", "phone_number"),
+    )
 
 
 class SbcState(Base):
@@ -245,4 +289,59 @@ class AuditLog(Base):
     user_agent = Column(String(500))
     success = Column(Boolean, nullable=False, default=True)
     error_message = Column(Text)
+    created_at = Column(DateTime(timezone=True), server_default=text("now()"))
+
+
+class SystemSetting(Base):
+    __tablename__ = "system_setting"
+
+    key = Column(String(100), primary_key=True)
+    value = Column(JSONB, nullable=False, default={})
+    category = Column(String(50), nullable=False, default="general")
+    description = Column(Text)
+    updated_at = Column(DateTime(timezone=True), server_default=text("now()"))
+    updated_by = Column(UUID(as_uuid=True), ForeignKey("app_user.id", ondelete="SET NULL"))
+
+
+class NotificationChannel(Base):
+    __tablename__ = "notification_channel"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    name = Column(String(200), nullable=False)
+    channel_type = Column(String(50), nullable=False)
+    config = Column(JSONB, nullable=False, default={})
+    is_enabled = Column(Boolean, nullable=False, default=True)
+    created_at = Column(DateTime(timezone=True), server_default=text("now()"))
+    updated_at = Column(DateTime(timezone=True), server_default=text("now()"))
+
+
+class NotificationLog(Base):
+    __tablename__ = "notification_log"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    channel_id = Column(UUID(as_uuid=True), ForeignKey("notification_channel.id", ondelete="SET NULL"))
+    alert_event_id = Column(UUID(as_uuid=True), ForeignKey("alert_event.id", ondelete="SET NULL"))
+    notification_type = Column(String(50), nullable=False)
+    subject = Column(String(500))
+    body = Column(Text)
+    recipient = Column(String(500))
+    success = Column(Boolean, nullable=False, default=True)
+    error_message = Column(Text)
+    sent_at = Column(DateTime(timezone=True), server_default=text("now()"))
+
+
+class EventLog(Base):
+    __tablename__ = "event_log"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    timestamp = Column(DateTime(timezone=True), server_default=text("now()"), nullable=False)
+    level = Column(String(20), nullable=False, default="info")
+    source = Column(String(100), nullable=False)
+    pbx_id = Column(UUID(as_uuid=True), ForeignKey("pbx_instance.id", ondelete="SET NULL"))
+    pbx_name = Column(String(200))
+    event_type = Column(String(100), nullable=False)
+    message = Column(Text, nullable=False)
+    detail = Column(JSONB, default={})
+    duration_ms = Column(Integer)
+    error_trace = Column(Text)
     created_at = Column(DateTime(timezone=True), server_default=text("now()"))

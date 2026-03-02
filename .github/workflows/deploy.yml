@@ -1,26 +1,27 @@
 # ═══════════════════════════════════════════════════════════════════════════
 # PBXMonitorX CI/CD Pipeline
 #
-# Triggers: push to main, pull requests
-# Steps:
-#   1. Lint Python (ruff)
-#   2. Build Docker images
-#   3. Deploy to production server via SSH (main branch only)
+# Triggers:
+#   develop branch → Deploy to DEV server
+#   main branch    → Deploy to PROD server (with environment approval)
+#   pull requests  → Lint + build only
 #
 # Required GitHub Secrets:
-#   SSH_HOST       — server IP or hostname
-#   SSH_USER       — SSH username (e.g. pbxmonitorx or root)
-#   SSH_KEY        — Private SSH key (Ed25519 recommended)
-#   DOMAIN         — Production domain (e.g. monitor.example.com)
+#   DEV_SSH_HOST   — Dev server IP or hostname
+#   DEV_SSH_USER   — Dev SSH username (e.g. azureuser)
+#   DEV_SSH_KEY    — Dev private SSH key
+#   PROD_SSH_HOST  — Prod server IP or hostname
+#   PROD_SSH_USER  — Prod SSH username (e.g. azureuser)
+#   PROD_SSH_KEY   — Prod private SSH key
 # ═══════════════════════════════════════════════════════════════════════════
 
 name: CI/CD
 
 on:
   push:
-    branches: [main]
+    branches: [main, develop]
   pull_request:
-    branches: [main]
+    branches: [main, develop]
 
 env:
   PYTHON_VERSION: "3.12"
@@ -80,12 +81,57 @@ jobs:
 
       - name: Verify image starts
         run: |
-          # Quick smoke test — image builds and uvicorn binary exists
           docker run --rm pbxmonitorx-backend:${{ github.sha }} \
             python -c "import src.main; print('App module loads OK')" || true
 
-  # ── DEPLOY TO PRODUCTION ───────────────────────────────────────
-  deploy:
+  # ── DEPLOY TO DEV ────────────────────────────────────────────────
+  deploy-dev:
+    runs-on: ubuntu-latest
+    needs: build
+    if: github.ref == 'refs/heads/develop' && github.event_name == 'push'
+    environment: development
+    concurrency:
+      group: deploy-dev
+      cancel-in-progress: true
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Deploy to Dev
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.DEV_SSH_HOST }}
+          username: ${{ secrets.DEV_SSH_USER }}
+          key: ${{ secrets.DEV_SSH_KEY }}
+          script_stop: true
+          script: |
+            set -e
+            cd /opt/pbxmonitorx
+
+            echo "=== Pulling latest (develop) ==="
+            git pull origin develop
+
+            echo "=== Building images ==="
+            docker compose -f docker-compose.prod.yml build --quiet
+
+            echo "=== Rolling restart ==="
+            docker compose -f docker-compose.prod.yml up -d --no-deps --build backend
+            docker compose -f docker-compose.prod.yml up -d --no-deps --build worker
+            docker compose -f docker-compose.prod.yml up -d --no-deps --build beat
+            docker compose -f docker-compose.prod.yml exec nginx nginx -s reload
+
+            echo "=== Cleanup old images ==="
+            docker image prune -f
+
+            echo "=== Verify health ==="
+            sleep 5
+            curl -sf http://localhost:8000/api/health || echo "Health check warning"
+
+            echo "=== Deploy complete ==="
+            docker compose -f docker-compose.prod.yml ps
+
+  # ── DEPLOY TO PRODUCTION ─────────────────────────────────────────
+  deploy-prod:
     runs-on: ubuntu-latest
     needs: build
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
@@ -97,30 +143,27 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Deploy via SSH
+      - name: Deploy to Production
         uses: appleboy/ssh-action@v1.0.3
         with:
-          host: ${{ secrets.SSH_HOST }}
-          username: ${{ secrets.SSH_USER }}
-          key: ${{ secrets.SSH_KEY }}
+          host: ${{ secrets.PROD_SSH_HOST }}
+          username: ${{ secrets.PROD_SSH_USER }}
+          key: ${{ secrets.PROD_SSH_KEY }}
           script_stop: true
           script: |
             set -e
             cd /opt/pbxmonitorx
 
-            echo "=== Pulling latest code ==="
+            echo "=== Pulling latest (main) ==="
             git pull origin main
 
             echo "=== Building images ==="
             docker compose -f docker-compose.prod.yml build --quiet
 
             echo "=== Rolling restart ==="
-            # Restart backend + workers (zero-downtime for nginx)
             docker compose -f docker-compose.prod.yml up -d --no-deps --build backend
             docker compose -f docker-compose.prod.yml up -d --no-deps --build worker
             docker compose -f docker-compose.prod.yml up -d --no-deps --build beat
-
-            # Reload nginx config without downtime
             docker compose -f docker-compose.prod.yml exec nginx nginx -s reload
 
             echo "=== Cleanup old images ==="

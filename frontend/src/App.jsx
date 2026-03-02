@@ -1,36 +1,149 @@
-import { useState, useRef } from "react";
+import { useState, useEffect, useRef, useCallback, Fragment } from "react";
 
+/* ═══════════════════════════════════════════════════════════════════════════
+   THEME & UTILITIES
+   ═══════════════════════════════════════════════════════════════════════════ */
 const C = { bg0:"#0A0A08",bg1:"#111110",bg2:"#1A1918",bg3:"#222120",border:"#2C2A28",borderL:"#3A3836",tx:"#D4D0CB",txD:"#8A8580",txM:"#5E5A55",txB:"#EDE9E4",ac:"#C8965A",acD:"#A0784A",acBg:"rgba(200,150,90,.08)",g:"#2ECC71",gB:"rgba(46,204,113,.1)",y:"#F1C40F",yB:"rgba(241,196,15,.1)",r:"#E74C3C",rB:"rgba(231,76,60,.1)",b:"#3498DB",bB:"rgba(52,152,219,.1)" };
 const F = `"IBM Plex Sans",system-ui,sans-serif`, M = `"IBM Plex Mono","Consolas",monospace`;
 
-const ago=(iso)=>{if(!iso)return"—";const m=Math.floor((Date.now()-new Date(iso))/60000);if(m<1)return"now";if(m<60)return m+"m";const h=Math.floor(m/60);return h<24?h+"h":Math.floor(h/24)+"d"};
-const fDate=(iso)=>iso?new Date(iso).toLocaleDateString("en-US",{month:"short",day:"numeric",year:"numeric"}):"—";
-const fTime=(iso)=>iso?new Date(iso).toLocaleString("en-US",{month:"short",day:"numeric",hour:"2-digit",minute:"2-digit"}):"—";
-const fBytes=(b)=>{if(!b)return"—";if(b>1e9)return(b/1e9).toFixed(1)+" GB";if(b>1e6)return(b/1e6).toFixed(0)+" MB";return(b/1024).toFixed(0)+" KB"};
-const sc=(s)=>({healthy:C.g,registered:C.g,online:C.g,available:C.g,pass:C.g,warning:C.y,degraded:C.y,warn:C.y,error:C.r,unregistered:C.r,offline:C.r,unavailable:C.r,critical:C.r,fail:C.r,info:C.b,skip:C.txM,untested:C.txM}[s]||C.txM);
-const sbg=(s)=>({healthy:C.gB,registered:C.gB,online:C.gB,available:C.gB,pass:C.gB,warning:C.yB,degraded:C.yB,warn:C.yB,error:C.rB,unregistered:C.rB,offline:C.rB,unavailable:C.rB,critical:C.rB,fail:C.rB,info:C.bB}[s]||"rgba(94,90,85,.06)");
+const ago=(iso)=>{if(!iso)return"\u2014";const m=Math.floor((Date.now()-new Date(iso))/60000);if(m<1)return"now";if(m<60)return m+"m";const h=Math.floor(m/60);return h<24?h+"h":Math.floor(h/24)+"d"};
+const fDate=(iso)=>iso?new Date(iso).toLocaleDateString("en-US",{month:"short",day:"numeric",year:"numeric"}):"\u2014";
+const fTime=(iso)=>iso?new Date(iso).toLocaleString("en-US",{month:"short",day:"numeric",hour:"2-digit",minute:"2-digit"}):"\u2014";
+const fBytes=(b)=>{if(!b)return"\u2014";if(b>1e9)return(b/1e9).toFixed(1)+" GB";if(b>1e6)return(b/1e6).toFixed(0)+" MB";return(b/1024).toFixed(0)+" KB"};
+const sc=(s)=>({healthy:C.g,registered:C.g,online:C.g,available:C.g,pass:C.g,warning:C.y,degraded:C.y,warn:C.y,error:C.r,unregistered:C.r,offline:C.r,unavailable:C.r,critical:C.r,fail:C.r,firing:C.r,acknowledged:C.y,resolved:C.g,info:C.b,skip:C.txM,untested:C.txM,active:C.g,inactive:C.r,local:C.b,azure_ad:C.ac,admin:C.ac,operator:C.b,viewer:C.txD}[s]||C.txM);
+const sbg=(s)=>({healthy:C.gB,registered:C.gB,online:C.gB,available:C.gB,pass:C.gB,warning:C.yB,degraded:C.yB,warn:C.yB,error:C.rB,unregistered:C.rB,offline:C.rB,unavailable:C.rB,critical:C.rB,fail:C.rB,firing:C.rB,acknowledged:C.yB,resolved:C.gB,info:C.bB,active:C.gB,inactive:C.rB,local:C.bB,azure_ad:C.acBg,admin:C.acBg,operator:C.bB,viewer:"rgba(94,90,85,.06)"}[s]||"rgba(94,90,85,.06)");
 
+/* ═══════════════════════════════════════════════════════════════════════════
+   API CLIENT
+   ═══════════════════════════════════════════════════════════════════════════ */
+const API = "/api";
+const headers = () => ({
+  "Content-Type": "application/json",
+  ...(localStorage.getItem("token") ? { Authorization: `Bearer ${localStorage.getItem("token")}` } : {})
+});
+const handleRes = async (r) => {
+  if (r.status === 401) {
+    localStorage.removeItem("token");
+    localStorage.removeItem("user");
+    window.dispatchEvent(new Event("auth-logout"));
+    return Promise.reject(r);
+  }
+  if (!r.ok) return Promise.reject(r);
+  const text = await r.text();
+  return text ? JSON.parse(text) : {};
+};
+const api = {
+  get: (path) => fetch(API + path, { headers: headers() }).then(handleRes),
+  post: (path, body) => fetch(API + path, { method: "POST", headers: headers(), body: JSON.stringify(body) }).then(handleRes),
+  patch: (path, body) => fetch(API + path, { method: "PATCH", headers: headers(), body: JSON.stringify(body) }).then(handleRes),
+  put: (path, body) => fetch(API + path, { method: "PUT", headers: headers(), body: JSON.stringify(body) }).then(handleRes),
+  del: (path) => fetch(API + path, { method: "DELETE", headers: headers() }).then(r => { if(r.status===401){localStorage.removeItem("token");localStorage.removeItem("user");window.dispatchEvent(new Event("auth-logout"));return Promise.reject(r);} if(!r.ok)return Promise.reject(r); return r; }),
+};
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   ICONS
+   ═══════════════════════════════════════════════════════════════════════════ */
+const iCk="M5 13l4 4L19 7",iX="M6 18L18 6M6 6l12 12",iDl="M12 4v12m0 0l-4-4m4 4l4-4M4 18h16",iRf="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15",iP="M12 4v16m8-8H4",iLk="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z",iSh="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z",iW="M12 9v2m0 4h.01M5.07 19h13.86c1.54 0 2.5-1.67 1.73-3L13.73 4c-.77-1.33-2.69-1.33-3.46 0L3.34 16c-.77 1.33.19 3 1.73 3z",iEye="M15 12a3 3 0 11-6 0 3 3 0 016 0zM2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z",iEyeX="M13.875 18.825A10.05 10.05 0 0112 19c-4.478 0-8.268-2.943-9.543-7a9.97 9.97 0 011.563-3.029m5.858.908a3 3 0 114.243 4.243M3 3l18 18";
+const iUser="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z";
+const iPhone="M3 5a2 2 0 012-2h3.28a1 1 0 01.948.684l1.498 4.493a1 1 0 01-.502 1.21l-2.257 1.13a11.042 11.042 0 005.516 5.516l1.13-2.257a1 1 0 011.21-.502l4.493 1.498a1 1 0 01.684.949V19a2 2 0 01-2 2h-1C9.716 21 3 14.284 3 6V5z";
+const iLogout="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1";
+const iEdit="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z";
+const iTrash="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16";
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   SHARED COMPONENTS
+   ═══════════════════════════════════════════════════════════════════════════ */
 const Pill=({status,label})=><span style={{display:"inline-flex",alignItems:"center",gap:5,padding:"2px 10px",borderRadius:99,fontSize:11,fontWeight:600,letterSpacing:".04em",textTransform:"uppercase",color:sc(status),background:sbg(status),whiteSpace:"nowrap"}}><span style={{width:6,height:6,borderRadius:"50%",background:sc(status)}}/>{label||status}</span>;
 const Stat=({l,v,c})=><div style={{textAlign:"center"}}><div style={{fontSize:20,fontWeight:700,color:c||C.txB,fontFamily:M}}>{v}</div><div style={{fontSize:9,color:C.txM,textTransform:"uppercase",letterSpacing:".06em",marginTop:3,fontWeight:600}}>{l}</div></div>;
 const Sv=({d,s=18,c="currentColor"})=><svg width={s} height={s} viewBox="0 0 24 24" fill="none" stroke={c} strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d={d}/></svg>;
+const Spinner=({size=20})=><span style={{display:"inline-block",width:size,height:size,border:"2px solid "+C.border,borderTopColor:C.ac,borderRadius:"50%",animation:"spin .6s linear infinite"}}/>;
+const PageLoader=()=><div style={{display:"flex",justifyContent:"center",alignItems:"center",padding:60}}><Spinner size={28}/></div>;
+const ErrorMsg=({msg,onRetry})=><div style={{padding:20,background:C.rB,border:"1px solid rgba(231,76,60,.2)",borderRadius:8,margin:"12px 0"}}><div style={{display:"flex",gap:10,alignItems:"center"}}><Sv d={iW} s={18} c={C.r}/><span style={{color:C.r,fontWeight:600,fontSize:14}}>{msg}</span>{onRetry&&<Btn small variant="ghost" onClick={onRetry}>Retry</Btn>}</div></div>;
 
-const iCk="M5 13l4 4L19 7",iX="M6 18L18 6M6 6l12 12",iDl="M12 4v12m0 0l-4-4m4 4l4-4M4 18h16",iRf="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15",iP="M12 4v16m8-8H4",iLk="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z",iSh="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z",iW="M12 9v2m0 4h.01M5.07 19h13.86c1.54 0 2.5-1.67 1.73-3L13.73 4c-.77-1.33-2.69-1.33-3.46 0L3.34 16c-.77 1.33.19 3 1.73 3z",iEye="M15 12a3 3 0 11-6 0 3 3 0 016 0zM2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z",iEyeX="M13.875 18.825A10.05 10.05 0 0112 19c-4.478 0-8.268-2.943-9.543-7a9.97 9.97 0 011.563-3.029m5.858.908a3 3 0 114.243 4.243M3 3l18 18";
-
-function Btn({children,variant="default",onClick,small,disabled,loading,style:sx,type}){const[h,setH]=useState(false);const v={default:{bg:C.bg3,bh:"#2E2C2A",bc:C.borderL,c:C.tx},primary:{bg:"#1B6B3A",bh:"#1E8045",bc:"#1B6B3A",c:"#fff"},danger:{bg:"#6B1A1A",bh:"#801F1F",bc:"#6B1A1A",c:"#FCA5A5"},ghost:{bg:"transparent",bh:"rgba(255,255,255,.04)",bc:"transparent",c:C.txD},accent:{bg:C.acD,bh:C.ac,bc:C.acD,c:"#fff"}}[variant];return<button type={type||"button"} onClick={onClick} disabled={disabled||loading} onMouseEnter={()=>setH(true)} onMouseLeave={()=>setH(false)} style={{display:"inline-flex",alignItems:"center",justifyContent:"center",gap:6,padding:small?"5px 12px":"9px 18px",fontSize:small?12:13,fontWeight:600,background:disabled?C.bg2:h?v.bh:v.bg,border:"1px solid "+(disabled?C.border:v.bc),borderRadius:6,color:disabled?C.txM:v.c,cursor:disabled?"not-allowed":"pointer",transition:"all .12s",fontFamily:F,opacity:disabled?.5:1,...sx}}>{loading&&<span style={{display:"inline-block",width:14,height:14,border:"2px solid rgba(255,255,255,.2)",borderTopColor:"#fff",borderRadius:"50%",animation:"spin .6s linear infinite"}}/>}{children}</button>}
+function Btn({children,variant="default",onClick,small,disabled,loading,style:sx,type}){const[h,setH]=useState(false);const v={default:{bg:C.bg3,bh:"#2E2C2A",bc:C.borderL,c:C.tx},primary:{bg:"#1B6B3A",bh:"#1E8045",bc:"#1B6B3A",c:"#fff"},danger:{bg:"#6B1A1A",bh:"#801F1F",bc:"#6B1A1A",c:"#FCA5A5"},ghost:{bg:"transparent",bh:"rgba(255,255,255,.04)",bc:"transparent",c:C.txD},accent:{bg:C.acD,bh:C.ac,bc:C.acD,c:"#fff"}}[variant];return<button type={type||"button"} onClick={onClick} disabled={disabled||loading} onMouseEnter={()=>setH(true)} onMouseLeave={()=>setH(false)} style={{display:"inline-flex",alignItems:"center",justifyContent:"center",gap:6,padding:small?"5px 12px":"9px 18px",fontSize:small?12:13,fontWeight:600,background:disabled?C.bg2:h?v.bh:v.bg,border:"1px solid "+(disabled?C.border:v.bc),borderRadius:6,color:disabled?C.txM:v.c,cursor:disabled?"not-allowed":"pointer",transition:"all .12s",fontFamily:F,opacity:disabled?.5:1,...sx}}>{loading&&<Spinner size={14}/>}{children}</button>}
 
 function Card({children,style,onClick,hv}){const[h,setH]=useState(false);return<div onClick={onClick} onMouseEnter={()=>setH(true)} onMouseLeave={()=>setH(false)} style={{background:h&&hv?C.bg3:C.bg2,border:"1px solid "+C.border,borderRadius:8,padding:20,cursor:onClick?"pointer":"default",transition:"all .15s",transform:h&&hv?"translateY(-1px)":"none",boxShadow:h&&hv?"0 6px 24px rgba(0,0,0,.4)":"none",...style}}>{children}</div>}
 
-function Table({cols,data}){return<div style={{overflowX:"auto"}}><table style={{width:"100%",borderCollapse:"collapse",fontSize:13}}><thead><tr>{cols.map(c=><th key={c.k} style={{textAlign:"left",padding:"10px 14px",borderBottom:"1px solid "+C.border,fontSize:10,textTransform:"uppercase",letterSpacing:".06em",color:C.txM,fontWeight:700}}>{c.l}</th>)}</tr></thead><tbody>{data.map((r,i)=><tr key={i} style={{borderBottom:"1px solid rgba(44,42,40,.4)"}}>{cols.map(c=><td key={c.k} style={{padding:"10px 14px",color:C.tx}}>{c.r?c.r(r[c.k],r):(r[c.k]||"—")}</td>)}</tr>)}{data.length===0&&<tr><td colSpan={cols.length} style={{padding:40,textAlign:"center",color:C.txM}}>No data</td></tr>}</tbody></table></div>}
+function Table({cols,data}){return<div style={{overflowX:"auto"}}><table style={{width:"100%",borderCollapse:"collapse",fontSize:13}}><thead><tr>{cols.map(c=><th key={c.k} style={{textAlign:"left",padding:"10px 14px",borderBottom:"1px solid "+C.border,fontSize:10,textTransform:"uppercase",letterSpacing:".06em",color:C.txM,fontWeight:700}}>{c.l}</th>)}</tr></thead><tbody>{data.map((r,i)=><tr key={r.id||i} style={{borderBottom:"1px solid rgba(44,42,40,.4)"}}>{cols.map(c=><td key={c.k} style={{padding:"10px 14px",color:C.tx}}>{c.r?c.r(r[c.k],r):(r[c.k]||"\u2014")}</td>)}</tr>)}{data.length===0&&<tr><td colSpan={cols.length} style={{padding:40,textAlign:"center",color:C.txM}}>No data</td></tr>}</tbody></table></div>}
 
-function Input({label,value,onChange,type="text",placeholder,help,error,mono,required,icon}){const[show,setShow]=useState(false);const isPass=type==="password";return<div style={{marginBottom:16}}><label style={{display:"block",fontSize:11,fontWeight:600,color:C.txD,textTransform:"uppercase",letterSpacing:".05em",marginBottom:5}}>{label}{required&&<span style={{color:C.r}}>*</span>}</label><div style={{position:"relative"}}><input type={isPass&&show?"text":type} value={value} onChange={e=>onChange(e.target.value)} placeholder={placeholder} style={{width:"100%",padding:"9px 12px",paddingRight:isPass?36:12,fontSize:13,fontFamily:mono?M:F,background:C.bg1,border:"1px solid "+(error?C.r:C.border),borderRadius:6,color:C.txB,outline:"none",boxSizing:"border-box",transition:"border-color .15s"}} onFocus={e=>e.target.style.borderColor=C.ac} onBlur={e=>e.target.style.borderColor=error?C.r:C.border}/>{isPass&&<button type="button" onClick={()=>setShow(!show)} style={{position:"absolute",right:8,top:"50%",transform:"translateY(-50%)",background:"none",border:"none",cursor:"pointer",padding:2}}><Sv d={show?iEyeX:iEye} s={16} c={C.txM}/></button>}</div>{help&&!error&&<div style={{fontSize:11,color:C.txM,marginTop:3}}>{help}</div>}{error&&<div style={{fontSize:11,color:C.r,marginTop:3}}>{error}</div>}</div>}
+function Input({label,value,onChange,type="text",placeholder,help,error,mono,required,icon,disabled}){const[show,setShow]=useState(false);const isPass=type==="password";return<div style={{marginBottom:16}}>{label&&<label style={{display:"block",fontSize:11,fontWeight:600,color:C.txD,textTransform:"uppercase",letterSpacing:".05em",marginBottom:5}}>{label}{required&&<span style={{color:C.r}}>*</span>}</label>}<div style={{position:"relative"}}><input type={isPass&&show?"text":type} value={value} onChange={e=>onChange(e.target.value)} placeholder={placeholder} disabled={disabled} style={{width:"100%",padding:"9px 12px",paddingRight:isPass?36:12,fontSize:13,fontFamily:mono?M:F,background:C.bg1,border:"1px solid "+(error?C.r:C.border),borderRadius:6,color:C.txB,outline:"none",boxSizing:"border-box",transition:"border-color .15s",opacity:disabled?.5:1}} onFocus={e=>e.target.style.borderColor=C.ac} onBlur={e=>e.target.style.borderColor=error?C.r:C.border}/>{isPass&&<button type="button" onClick={()=>setShow(!show)} style={{position:"absolute",right:8,top:"50%",transform:"translateY(-50%)",background:"none",border:"none",cursor:"pointer",padding:2}}><Sv d={show?iEyeX:iEye} s={16} c={C.txM}/></button>}</div>{help&&!error&&<div style={{fontSize:11,color:C.txM,marginTop:3}}>{help}</div>}{error&&<div style={{fontSize:11,color:C.r,marginTop:3}}>{error}</div>}</div>}
 
-function Select({label,value,onChange,options,help}){return<div style={{marginBottom:16}}><label style={{display:"block",fontSize:11,fontWeight:600,color:C.txD,textTransform:"uppercase",letterSpacing:".05em",marginBottom:5}}>{label}</label><select value={value} onChange={e=>onChange(e.target.value)} style={{width:"100%",padding:"9px 12px",fontSize:13,fontFamily:F,background:C.bg1,border:"1px solid "+C.border,borderRadius:6,color:C.txB,outline:"none",cursor:"pointer"}}>{options.map(o=><option key={o.v} value={o.v}>{o.l}</option>)}</select>{help&&<div style={{fontSize:11,color:C.txM,marginTop:3}}>{help}</div>}</div>}
+function Select({label,value,onChange,options,help}){return<div style={{marginBottom:16}}>{label&&<label style={{display:"block",fontSize:11,fontWeight:600,color:C.txD,textTransform:"uppercase",letterSpacing:".05em",marginBottom:5}}>{label}</label>}<select value={value} onChange={e=>onChange(e.target.value)} style={{width:"100%",padding:"9px 12px",fontSize:13,fontFamily:F,background:C.bg1,border:"1px solid "+C.border,borderRadius:6,color:C.txB,outline:"none",cursor:"pointer"}}>{options.map(o=><option key={o.v} value={o.v}>{o.l}</option>)}</select>{help&&<div style={{fontSize:11,color:C.txM,marginTop:3}}>{help}</div>}</div>}
 
 /* ═══════════════════════════════════════════════════════════════════════════
-   ADD INSTANCE MODAL — Test Connection + Save
+   MODAL WRAPPER
+   ═══════════════════════════════════════════════════════════════════════════ */
+function Modal({onClose,title,subtitle,width=560,children}){
+  return<div style={{position:"fixed",inset:0,zIndex:1000,display:"flex",alignItems:"center",justifyContent:"center"}}>
+    <div style={{position:"absolute",inset:0,background:"rgba(0,0,0,.7)",backdropFilter:"blur(4px)"}} onClick={onClose}/>
+    <div style={{position:"relative",background:C.bg1,border:"1px solid "+C.border,borderRadius:12,width,maxHeight:"90vh",overflow:"auto",boxShadow:"0 20px 60px rgba(0,0,0,.6)"}}>
+      <div style={{padding:"20px 24px",borderBottom:"1px solid "+C.border,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+        <div><div style={{fontSize:17,fontWeight:700,color:C.txB}}>{title}</div>{subtitle&&<div style={{fontSize:12,color:C.txM,marginTop:2}}>{subtitle}</div>}</div>
+        <button onClick={onClose} style={{background:"none",border:"none",cursor:"pointer",padding:4}}><Sv d={iX} s={20} c={C.txM}/></button>
+      </div>
+      <div style={{padding:"20px 24px"}}>{children}</div>
+    </div>
+  </div>;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   LOGIN PAGE
+   ═══════════════════════════════════════════════════════════════════════════ */
+function LoginPage({onLogin}){
+  const[username,setUsername]=useState("");
+  const[password,setPassword]=useState("");
+  const[loading,setLoading]=useState(false);
+  const[error,setError]=useState("");
+  const[ssoEnabled,setSsoEnabled]=useState(false);
+
+  useEffect(()=>{
+    api.get("/auth/sso/config").then(d=>{if(d&&d.enabled)setSsoEnabled(true)}).catch(()=>{});
+  },[]);
+
+  const doLogin=async(e)=>{
+    e.preventDefault();
+    if(!username||!password){setError("Username and password required");return;}
+    setLoading(true);setError("");
+    try{
+      const res=await api.post("/auth/login",{username,password});
+      localStorage.setItem("token",res.access_token);
+      localStorage.setItem("user",JSON.stringify(res.user));
+      onLogin(res.user);
+    }catch(err){
+      let msg="Login failed";
+      try{const b=await err.json();msg=b.detail||msg;}catch{}
+      setError(msg);
+    }finally{setLoading(false);}
+  };
+
+  return<div style={{display:"flex",alignItems:"center",justifyContent:"center",height:"100vh",background:C.bg0,fontFamily:F}}>
+    <div style={{width:380,background:C.bg1,border:"1px solid "+C.border,borderRadius:12,padding:32,boxShadow:"0 20px 60px rgba(0,0,0,.5)"}}>
+      <div style={{textAlign:"center",marginBottom:28}}>
+        <div style={{fontSize:24,fontWeight:800,color:C.txB,letterSpacing:"-.02em"}}>PBXMonitor<span style={{color:C.ac}}>X</span></div>
+        <div style={{fontSize:12,color:C.txM,marginTop:4}}>3CX Monitor & Backup Management</div>
+      </div>
+      <form onSubmit={doLogin}>
+        <Input label="Username" value={username} onChange={setUsername} placeholder="admin" required/>
+        <Input label="Password" value={password} onChange={setPassword} type="password" placeholder="Enter password" required/>
+        {error&&<div style={{fontSize:12,color:C.r,marginBottom:12,padding:"8px 12px",background:C.rB,borderRadius:6}}>{error}</div>}
+        <Btn variant="accent" type="submit" loading={loading} style={{width:"100%",marginTop:4}}>Sign In</Btn>
+      </form>
+      {ssoEnabled&&<>
+        <div style={{display:"flex",alignItems:"center",gap:12,margin:"20px 0"}}><div style={{flex:1,height:1,background:C.border}}/><span style={{fontSize:11,color:C.txM}}>OR</span><div style={{flex:1,height:1,background:C.border}}/></div>
+        <Btn variant="default" onClick={()=>{window.location.href="/api/auth/sso/login"}} style={{width:"100%"}}>
+          <Sv d="M5.5 3.5h5v5h-5zM13.5 3.5h5v5h-5zM5.5 11.5h5v5h-5zM13.5 11.5h5v5h-5z" s={16} c={C.b}/>
+          Sign in with Microsoft
+        </Btn>
+      </>}
+    </div>
+  </div>;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   ADD INSTANCE MODAL
    ═══════════════════════════════════════════════════════════════════════════ */
 function AddInstanceModal({onClose,onSave}){
-  const[step,setStep]=useState("form"); // form → testing → results → saving
+  const[step,setStep]=useState("form");
   const[form,setForm]=useState({name:"",base_url:"https://",username:"admin",password:"",tls_policy:"verify",poll_interval_s:60,notes:""});
   const[errors,setErrors]=useState({});
   const[testResult,setTestResult]=useState(null);
@@ -52,120 +165,96 @@ function AddInstanceModal({onClose,onSave}){
   const runTest=async()=>{
     if(!validate())return;
     setStep("testing");setTestSteps([]);setTestResult(null);
-
-    // Simulate the multi-step test connection process
-    // In production, this calls POST /api/pbx/test-connection
-    const steps = [];
-    const addStep=(s)=>{steps.push(s);setTestSteps([...steps])};
-
-    await new Promise(r=>setTimeout(r,400));
-    addStep({step:"tls_connect",status:"pass",message:`HTTPS connection to ${form.base_url} successful (142ms)`,duration_ms:142});
-
-    await new Promise(r=>setTimeout(r,600));
-    if(form.password.length<3){
-      addStep({step:"authenticate",status:"fail",message:"Invalid credentials — HTTP 401",duration_ms:89});
-      setTestResult({success:false,message:"Authentication failed. Check username and password."});
+    try{
+      const res=await api.post("/pbx/test-connection",{
+        base_url:form.base_url.trim().replace(/\/$/,""),
+        username:form.username,
+        password:form.password,
+        tls_policy:form.tls_policy,
+      });
+      setTestSteps(res.steps||[]);
+      setTestResult({
+        success:res.success,
+        version:res.version,
+        message:res.message,
+        capabilities:res.capabilities||[],
+      });
       setStep("results");
-      return;
+    }catch(err){
+      let msg="Connection test failed";
+      try{const b=await err.json();msg=b.detail||msg;}catch{}
+      setTestResult({success:false,message:msg});
+      setStep("results");
     }
-    addStep({step:"authenticate",status:"pass",message:"Login successful via webclient_token (89ms)",duration_ms:89});
-
-    await new Promise(r=>setTimeout(r,400));
-    addStep({step:"version_detect",status:"pass",message:"Detected version: 20.0.3.884",duration_ms:45});
-
-    await new Promise(r=>setTimeout(r,300));
-    addStep({step:"probe_trunks",status:"pass",message:"trunks: ✓ available via api_json",duration_ms:67});
-    await new Promise(r=>setTimeout(r,200));
-    addStep({step:"probe_sbcs",status:"pass",message:"sbcs: ✓ available via api_json",duration_ms:52});
-    await new Promise(r=>setTimeout(r,200));
-    addStep({step:"probe_license",status:"pass",message:"license: ✓ available via api_json",duration_ms:38});
-    await new Promise(r=>setTimeout(r,200));
-    addStep({step:"probe_backup_list",status:"pass",message:"backup_list: ✓ available via api_json",duration_ms:41});
-
-    setTestResult({
-      success:true,
-      version:"20.0.3.884",
-      message:"All systems operational — ready to monitor",
-      capabilities:[
-        {feature:"trunks",status:"available",method:"api_json"},
-        {feature:"sbcs",status:"available",method:"api_json"},
-        {feature:"license",status:"available",method:"api_json"},
-        {feature:"backup_list",status:"available",method:"api_json"},
-      ]
-    });
-    setStep("results");
   };
 
   const saveInstance=async()=>{
     setSaving(true);
-    // In production: POST /api/pbx/instances with form + testResult.capabilities
-    await new Promise(r=>setTimeout(r,500));
-    onSave({
-      id:crypto.randomUUID(),name:form.name,base_url:form.base_url,
-      version:testResult?.version||null,status:"healthy",
-      last_seen:new Date().toISOString(),credential_username:form.username,
-      trunks:[],sbcs:[],license:{edition:"—",expiry:null,calls:0,valid:null,warnings:[]},
-      backups:[],caps:Object.fromEntries((testResult?.capabilities||[]).map(c=>[c.feature,c.status]))
-    });
-    setSaving(false);
-    onClose();
+    try{
+      await api.post("/pbx/instances",{
+        name:form.name.trim(),
+        base_url:form.base_url.trim().replace(/\/$/,""),
+        username:form.username,
+        password:form.password,
+        tls_policy:form.tls_policy,
+        poll_interval_s:form.poll_interval_s,
+        notes:form.notes,
+        detected_version:testResult?.version||null,
+        capabilities:testResult?.capabilities?.map(c=>({feature:c.feature,status:c.status,method:c.method}))||[],
+      });
+      onSave();
+      onClose();
+    }catch(err){
+      let msg="Failed to save";
+      try{const b=await err.json();msg=b.detail||msg;}catch{}
+      alert(msg);
+    }finally{setSaving(false);}
   };
 
   return<div style={{position:"fixed",inset:0,zIndex:1000,display:"flex",alignItems:"center",justifyContent:"center"}}>
     <div style={{position:"absolute",inset:0,background:"rgba(0,0,0,.7)",backdropFilter:"blur(4px)"}} onClick={onClose}/>
     <div style={{position:"relative",background:C.bg1,border:"1px solid "+C.border,borderRadius:12,width:560,maxHeight:"90vh",overflow:"auto",boxShadow:"0 20px 60px rgba(0,0,0,.6)"}}>
-      {/* Header */}
       <div style={{padding:"20px 24px",borderBottom:"1px solid "+C.border,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
         <div>
-          <div style={{fontSize:17,fontWeight:700,color:C.txB}}>Add PBX Instance</div>
+          <div style={{fontSize:17,fontWeight:700,color:C.txB}}>Add PBX System</div>
           <div style={{fontSize:12,color:C.txM,marginTop:2}}>
-            {step==="form"?"Enter connection details":step==="testing"?"Testing connectivity…":step==="results"?(testResult?.success?"Connection verified":"Connection failed"):""}
+            {step==="form"?"Enter connection details":step==="testing"?"Testing connectivity...":step==="results"?(testResult?.success?"Connection verified":"Connection failed"):""}
           </div>
         </div>
         <button onClick={onClose} style={{background:"none",border:"none",cursor:"pointer",padding:4}}><Sv d={iX} s={20} c={C.txM}/></button>
       </div>
-
       <div style={{padding:"20px 24px"}}>
-        {/* ── FORM STEP ── */}
         {step==="form"&&<>
-          {/* Security notice */}
           <div style={{display:"flex",gap:10,padding:12,background:C.acBg,border:"1px solid rgba(200,150,90,.15)",borderRadius:6,marginBottom:20,fontSize:12,color:C.ac}}>
             <Sv d={iSh} s={18} c={C.ac}/>
-            <div><strong>Credentials encrypted at rest</strong> with AES-256-GCM. Passwords never stored in plaintext. Connection over HTTPS only.</div>
+            <div><strong>Credentials encrypted at rest</strong> with AES-256-GCM. Passwords never stored in plaintext.</div>
           </div>
-
-          <Input label="Instance Name" value={form.name} onChange={v=>upd("name",v)} placeholder="e.g. HQ Production PBX" error={errors.name} required/>
+          <Input label="System Name" value={form.name} onChange={v=>upd("name",v)} placeholder="e.g. HQ Production PBX" error={errors.name} required/>
           <Input label="PBX URL" value={form.base_url} onChange={v=>upd("base_url",v)} placeholder="https://pbx.example.com:5001" help="Full HTTPS URL to the 3CX management console" error={errors.base_url} mono required/>
-
           <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:14}}>
             <Input label="Admin Username" value={form.username} onChange={v=>upd("username",v)} placeholder="admin" error={errors.username} required/>
-            <Input label="Password" value={form.password} onChange={v=>upd("password",v)} type="password" placeholder="••••••••" error={errors.password} required/>
+            <Input label="Password" value={form.password} onChange={v=>upd("password",v)} type="password" placeholder="Password" error={errors.password} required/>
           </div>
-
           <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:14}}>
-            <Select label="TLS Verification" value={form.tls_policy} onChange={v=>upd("tls_policy",v)} options={[{v:"verify",l:"Verify Certificate (Recommended)"},{v:"trust_self_signed",l:"Trust Self-Signed"}]} help={form.tls_policy==="trust_self_signed"?"⚠ Less secure — only use for lab/dev":"Strict TLS certificate verification"}/>
-            <Select label="Poll Interval" value={form.poll_interval_s} onChange={v=>upd("poll_interval_s",+v)} options={[{v:30,l:"30 seconds"},{v:60,l:"60 seconds (Recommended)"},{v:120,l:"2 minutes"},{v:300,l:"5 minutes"}]}/>
+            <Select label="TLS Verification" value={form.tls_policy} onChange={v=>upd("tls_policy",v)} options={[{v:"verify",l:"Verify Certificate (Recommended)"},{v:"trust_self_signed",l:"Trust Self-Signed"}]} help={form.tls_policy==="trust_self_signed"?"Warning: Less secure":"Strict TLS certificate verification"}/>
+            <Select label="Poll Interval" value={form.poll_interval_s} onChange={v=>upd("poll_interval_s",+v)} options={[{v:60,l:"60 seconds (Recommended)"},{v:300,l:"5 minutes"},{v:600,l:"10 minutes"},{v:3600,l:"60 minutes"}]}/>
           </div>
-
-          <Input label="Notes" value={form.notes} onChange={v=>upd("notes",v)} placeholder="Optional description or location…"/>
-
+          <Input label="Notes" value={form.notes} onChange={v=>upd("notes",v)} placeholder="Optional description or location..."/>
           {form.tls_policy==="trust_self_signed"&&<div style={{display:"flex",gap:10,padding:12,background:C.rB,border:"1px solid rgba(231,76,60,.2)",borderRadius:6,marginBottom:16,fontSize:12,color:C.r}}>
             <Sv d={iW} s={18} c={C.r}/>
-            <div><strong>Self-signed certificate trust enabled.</strong> This disables TLS verification for this host. Only use for development or isolated lab environments. This will be logged in the audit trail.</div>
+            <div><strong>Self-signed certificate trust enabled.</strong> Only use for development or isolated lab environments.</div>
           </div>}
-
           <div style={{display:"flex",justifyContent:"flex-end",gap:10,paddingTop:8,borderTop:"1px solid "+C.border}}>
             <Btn variant="ghost" onClick={onClose}>Cancel</Btn>
             <Btn variant="accent" onClick={runTest}><Sv d={iSh} s={14}/> Test Connection</Btn>
           </div>
         </>}
 
-        {/* ── TESTING STEP ── */}
         {step==="testing"&&<div>
-          <div style={{marginBottom:16,fontSize:13,color:C.txD}}>Validating connectivity and discovering capabilities…</div>
+          <div style={{marginBottom:16,fontSize:13,color:C.txD}}>Validating connectivity and discovering capabilities...</div>
           {testSteps.map((s,i)=><div key={i} style={{display:"flex",alignItems:"flex-start",gap:10,padding:"8px 0",borderBottom:"1px solid rgba(44,42,40,.3)",animation:"fadeIn .3s ease"}}>
             <div style={{marginTop:2,flexShrink:0}}>
-              {s.status==="pass"?<Sv d={iCk} s={16} c={C.g}/>:s.status==="fail"?<Sv d={iX} s={16} c={C.r}/>:<span style={{display:"inline-block",width:16,height:16,border:"2px solid "+C.txM,borderTopColor:C.ac,borderRadius:"50%",animation:"spin .6s linear infinite"}}/>}
+              {s.status==="pass"?<Sv d={iCk} s={16} c={C.g}/>:s.status==="fail"?<Sv d={iX} s={16} c={C.r}/>:<Spinner size={16}/>}
             </div>
             <div style={{flex:1}}>
               <div style={{fontSize:12,fontWeight:600,color:s.status==="fail"?C.r:C.txB}}>{s.step.replace(/_/g," ")}</div>
@@ -173,12 +262,10 @@ function AddInstanceModal({onClose,onSave}){
             </div>
             {s.duration_ms>0&&<div style={{fontSize:10,color:C.txM,fontFamily:M,flexShrink:0}}>{s.duration_ms}ms</div>}
           </div>)}
-          {!testResult&&<div style={{textAlign:"center",padding:16}}><span style={{display:"inline-block",width:20,height:20,border:"2px solid "+C.border,borderTopColor:C.ac,borderRadius:"50%",animation:"spin .6s linear infinite"}}/></div>}
+          <div style={{textAlign:"center",padding:16}}><Spinner/></div>
         </div>}
 
-        {/* ── RESULTS STEP ── */}
         {step==="results"&&<div>
-          {/* Result banner */}
           <div style={{display:"flex",gap:12,padding:14,background:testResult.success?C.gB:C.rB,border:"1px solid "+(testResult.success?"rgba(46,204,113,.2)":"rgba(231,76,60,.2)"),borderRadius:8,marginBottom:18}}>
             <div style={{marginTop:1}}>{testResult.success?<Sv d={iCk} s={22} c={C.g}/>:<Sv d={iX} s={22} c={C.r}/>}</div>
             <div>
@@ -187,8 +274,6 @@ function AddInstanceModal({onClose,onSave}){
               {testResult.version&&<div style={{fontSize:11,color:C.txM,marginTop:2,fontFamily:M}}>3CX Version: {testResult.version}</div>}
             </div>
           </div>
-
-          {/* Capability matrix */}
           {testResult.capabilities?.length>0&&<div style={{marginBottom:18}}>
             <div style={{fontSize:11,fontWeight:700,color:C.txM,textTransform:"uppercase",letterSpacing:".05em",marginBottom:8}}>Capability Matrix</div>
             <div style={{display:"grid",gridTemplateColumns:"repeat(2,1fr)",gap:6}}>
@@ -200,9 +285,7 @@ function AddInstanceModal({onClose,onSave}){
               </div>)}
             </div>
           </div>}
-
-          {/* Test steps */}
-          <details style={{marginBottom:18}}>
+          {testSteps.length>0&&<details style={{marginBottom:18}}>
             <summary style={{fontSize:11,fontWeight:600,color:C.txM,cursor:"pointer",textTransform:"uppercase",letterSpacing:".05em"}}>Connection Steps ({testSteps.length})</summary>
             <div style={{marginTop:8}}>
               {testSteps.map((s,i)=><div key={i} style={{display:"flex",alignItems:"center",gap:8,padding:"5px 0",fontSize:12}}>
@@ -210,12 +293,11 @@ function AddInstanceModal({onClose,onSave}){
                 <span style={{color:C.txD,fontFamily:M}}>{s.message}</span>
               </div>)}
             </div>
-          </details>
-
+          </details>}
           <div style={{display:"flex",justifyContent:"flex-end",gap:10,paddingTop:12,borderTop:"1px solid "+C.border}}>
-            <Btn variant="ghost" onClick={()=>{setStep("form");setTestResult(null);setTestSteps([])}}>← Edit Details</Btn>
+            <Btn variant="ghost" onClick={()=>{setStep("form");setTestResult(null);setTestSteps([])}}>Edit Details</Btn>
             {!testResult.success&&<Btn variant="accent" onClick={runTest}><Sv d={iRf} s={14}/> Retry</Btn>}
-            {testResult.success&&<Btn variant="primary" onClick={saveInstance} loading={saving}><Sv d={iCk} s={14}/> Save Instance</Btn>}
+            {testResult.success&&<Btn variant="primary" onClick={saveInstance} loading={saving}><Sv d={iCk} s={14}/> Save System</Btn>}
           </div>
         </div>}
       </div>
@@ -225,115 +307,1295 @@ function AddInstanceModal({onClose,onSave}){
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
-   MOCK DATA
+   EDIT INSTANCE MODAL
    ═══════════════════════════════════════════════════════════════════════════ */
-const INIT = [
-  {id:"1",name:"HQ Production PBX",base_url:"https://pbx-hq.acme.com:5001",version:"20.0.3.884",status:"healthy",last_seen:"2026-02-18T10:32:00Z",credential_username:"admin",
-    trunks:[{name:"Twilio US",status:"registered",provider:"Twilio",last_error:null,inbound:true,outbound:true,changed:"2026-02-17T08:00:00Z"},{name:"Vonage UK",status:"registered",provider:"Vonage",last_error:null,inbound:true,outbound:true,changed:"2026-02-16T12:30:00Z"},{name:"BT PSTN",status:"unregistered",provider:"BT",last_error:"408 Request Timeout",inbound:false,outbound:false,changed:"2026-02-18T09:45:00Z"}],
-    sbcs:[{name:"SBC-East",status:"online",last_seen:"2026-02-18T10:31:00Z",tunnel:"Connected"},{name:"SBC-West",status:"online",last_seen:"2026-02-18T10:30:00Z",tunnel:"Connected"}],
-    license:{edition:"Enterprise",expiry:"2026-08-15",maint:"2026-08-15",calls:64,valid:true,warnings:[]},
-    backups:[{id:"b1",name:"backup_20260218_020000.zip",date:"2026-02-18T02:00:00Z",size:157286400,type:"Full"},{id:"b2",name:"backup_20260217_020000.zip",date:"2026-02-17T02:00:00Z",size:155648000,type:"Full"}],
-    caps:{trunks:"available",sbcs:"available",license:"available",backup_list:"available"}},
-  {id:"2",name:"Branch Office",base_url:"https://pbx-branch.acme.com:5001",version:"20.0.2.501",status:"warning",last_seen:"2026-02-18T10:30:00Z",credential_username:"monitor-svc",
-    trunks:[{name:"SIP.us Trunk",status:"registered",provider:"SIP.us",last_error:null,inbound:true,outbound:true,changed:"2026-02-15T14:00:00Z"}],
-    sbcs:[{name:"SBC-Branch",status:"offline",last_seen:"2026-02-18T08:15:00Z",tunnel:"Disconnected"}],
-    license:{edition:"Professional",expiry:"2026-03-10",maint:"2026-03-10",calls:16,valid:true,warnings:["Expires in 20 days"]},
-    backups:[{id:"b3",name:"backup_20260216.zip",date:"2026-02-16T02:00:00Z",size:52428800,type:"Full"}],
-    caps:{trunks:"available",sbcs:"degraded",license:"available",backup_list:"available"}},
-];
-const ALERTS=[{id:"a1",sev:"critical",title:"Trunk 'BT PSTN' unregistered >60s",pbx:"HQ Production PBX",time:"2026-02-18T09:45:00Z",state:"active"},{id:"a2",sev:"critical",title:"SBC-Branch offline >2h",pbx:"Branch Office",time:"2026-02-18T08:15:00Z",state:"active"},{id:"a3",sev:"warning",title:"License expires in 20 days",pbx:"Branch Office",time:"2026-02-18T00:00:00Z",state:"active"},{id:"a4",sev:"warning",title:"No backup in 48h",pbx:"Branch Office",time:"2026-02-18T02:00:00Z",state:"active"}];
-const AUDIT=[{id:"1",action:"pbx_created",user:"admin",target:"HQ Production PBX",detail:"Test connection passed, instance saved",time:"2026-02-18T07:55:00Z",ok:true},{id:"2",action:"user_login",user:"admin",target:"System",detail:"Login from 10.0.1.5",time:"2026-02-18T08:00:00Z",ok:true},{id:"3",action:"backup_downloaded",user:"admin",target:"HQ Production PBX",detail:"backup_20260218_020000.zip (150 MB)",time:"2026-02-18T08:05:00Z",ok:true},{id:"4",action:"poll_failed",user:"system",target:"Branch Office",detail:"SBC endpoint HTTP 500",time:"2026-02-18T06:00:00Z",ok:false},{id:"5",action:"capability_probe",user:"system",target:"Branch Office",detail:"SBC feature degraded — HTML fallback",time:"2026-02-17T04:00:00Z",ok:true}];
+function EditInstanceModal({inst,onClose,onSave}){
+  const[form,setForm]=useState({name:inst.name||"",tls_policy:inst.tls_policy||"verify",poll_interval_s:inst.poll_interval_s||60,notes:inst.notes||"",is_enabled:inst.is_enabled!==false,password:""});
+  const[saving,setSaving]=useState(false);
+  const upd=(k,v)=>setForm(p=>({...p,[k]:v}));
+
+  const save=async()=>{
+    setSaving(true);
+    try{
+      const body={name:form.name,tls_policy:form.tls_policy,poll_interval_s:form.poll_interval_s,notes:form.notes,is_enabled:form.is_enabled};
+      if(form.password)body.password=form.password;
+      await api.patch("/pbx/instances/"+inst.id,body);
+      onSave();onClose();
+    }catch(err){
+      let msg="Save failed";try{const b=await err.json();msg=b.detail||msg;}catch{}
+      alert(msg);
+    }finally{setSaving(false);}
+  };
+
+  return<Modal onClose={onClose} title="Edit System" subtitle={inst.name}>
+    <Input label="Name" value={form.name} onChange={v=>upd("name",v)} required/>
+    <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:14}}>
+      <Select label="TLS Policy" value={form.tls_policy} onChange={v=>upd("tls_policy",v)} options={[{v:"verify",l:"Verify Certificate"},{v:"trust_self_signed",l:"Trust Self-Signed"}]}/>
+      <Select label="Poll Interval" value={form.poll_interval_s} onChange={v=>upd("poll_interval_s",+v)} options={[{v:60,l:"60 seconds"},{v:300,l:"5 minutes"},{v:600,l:"10 minutes"},{v:3600,l:"60 minutes"}]}/>
+    </div>
+    <Input label="New Password" value={form.password} onChange={v=>upd("password",v)} type="password" placeholder="Leave blank to keep current" help="Only set if you need to change the PBX password"/>
+    <Input label="Notes" value={form.notes} onChange={v=>upd("notes",v)} placeholder="Optional"/>
+    <div style={{marginBottom:16}}><label style={{display:"flex",alignItems:"center",gap:8,cursor:"pointer"}}>
+      <input type="checkbox" checked={form.is_enabled} onChange={e=>upd("is_enabled",e.target.checked)} style={{accentColor:C.ac}}/>
+      <span style={{fontSize:13,color:C.txB}}>Polling Enabled</span>
+    </label></div>
+    <div style={{display:"flex",justifyContent:"flex-end",gap:10,paddingTop:12,borderTop:"1px solid "+C.border}}>
+      <Btn variant="ghost" onClick={onClose}>Cancel</Btn>
+      <Btn variant="primary" onClick={save} loading={saving}>Save Changes</Btn>
+    </div>
+  </Modal>;
+}
+
 
 /* ═══════════════════════════════════════════════════════════════════════════
-   PAGES
+   DASHBOARD PAGE
    ═══════════════════════════════════════════════════════════════════════════ */
-function Dashboard({instances,onSelect,onAdd}){
-  const tA=instances.reduce((a,i)=>a+i.trunks.length,0),tD=instances.reduce((a,i)=>a+i.trunks.filter(t=>t.status!=="registered").length,0),sO=instances.reduce((a,i)=>a+i.sbcs.filter(s=>s.status==="offline").length,0),lW=instances.reduce((a,i)=>a+(i.license.warnings?.length||0),0);
+function DashboardPage({onNavigate}){
+  const[summary,setSummary]=useState(null);
+  const[alerts,setAlerts]=useState([]);
+  const[loading,setLoading]=useState(true);
+  const[error,setError]=useState("");
+
+  const load=useCallback(async()=>{
+    try{
+      const[sm,al]=await Promise.all([
+        api.get("/pbx/dashboard-summary"),
+        api.get("/alerts?state=firing&limit=10"),
+      ]);
+      setSummary(sm);setAlerts(al||[]);setError("");
+    }catch{setError("Failed to load dashboard data");}
+    finally{setLoading(false);}
+  },[]);
+
+  useEffect(()=>{load();const iv=setInterval(load,30000);return()=>clearInterval(iv);},[load]);
+
+  if(loading)return<PageLoader/>;
+  if(error)return<ErrorMsg msg={error} onRetry={load}/>;
+  const s=summary||{pbx:{},trunks:{},sbcs:{},alerts:{},backups:{},problem_pbxes:[]};
+  const firingAlerts=(alerts||[]).filter(a=>a.state==="firing");
+
   return<div>
     <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:22}}>
-      <div><h1 style={{fontSize:22,fontWeight:700,color:C.txB,margin:0}}>Dashboard</h1><p style={{fontSize:13,color:C.txM,margin:"3px 0 0"}}>{instances.length} instance{instances.length!==1?"s":""} monitored</p></div>
-      <div style={{display:"flex",gap:8}}><Btn variant="ghost" small><Sv d={iRf} s={14}/> Refresh</Btn><Btn variant="accent" onClick={onAdd}><Sv d={iP} s={14}/> Add Instance</Btn></div>
+      <div><h1 style={{fontSize:22,fontWeight:700,color:C.txB,margin:0}}>Dashboard</h1><p style={{fontSize:13,color:C.txM,margin:"3px 0 0"}}>{s.pbx.total||0} system{s.pbx.total!==1?"s":""} monitored</p></div>
+      <Btn variant="ghost" small onClick={load}><Sv d={iRf} s={14}/> Refresh</Btn>
     </div>
-    <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:10,marginBottom:22}}>
-      {[{l:"Trunks Total",v:tA},{l:"Trunks Down",v:tD,c:tD>0?C.r:C.g},{l:"SBCs Offline",v:sO,c:sO>0?C.r:C.g},{l:"License Alerts",v:lW,c:lW>0?C.y:C.g}].map((s,i)=><Card key={i} style={{padding:14,display:"flex",justifyContent:"center"}}><Stat l={s.l} v={s.v} c={s.c}/></Card>)}
+
+    {/* Top Stats */}
+    <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(180px,1fr))",gap:10,marginBottom:22}}>
+      <Card style={{padding:14,display:"flex",justifyContent:"center"}}><Stat l="PBX Systems" v={`${s.pbx.enabled||0}/${s.pbx.total||0}`} c={s.pbx.errors>0?C.y:C.g}/></Card>
+      <Card style={{padding:14,display:"flex",justifyContent:"center"}}><Stat l="Trunks" v={`${s.trunks.registered||0}/${s.trunks.total||0}`} c={s.trunks.down>0?C.r:C.g}/></Card>
+      <Card style={{padding:14,display:"flex",justifyContent:"center"}}><Stat l="SBCs" v={`${s.sbcs.online||0}/${s.sbcs.total||0}`} c={s.sbcs.offline>0?C.r:C.g}/></Card>
+      <Card style={{padding:14,display:"flex",justifyContent:"center"}}><Stat l="Active Alerts" v={s.alerts.firing||0} c={(s.alerts.firing||0)>0?C.r:C.g}/></Card>
+      <Card style={{padding:14,display:"flex",justifyContent:"center"}}><Stat l="Backups" v={s.backups.total||0} c={C.b}/></Card>
+      <Card style={{padding:14,display:"flex",justifyContent:"center"}}><Stat l="Backup Size" v={fBytes(s.backups.total_bytes)} c={C.txD}/></Card>
     </div>
-    <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(360px,1fr))",gap:12}}>
-      {instances.map(inst=>{const d=inst.trunks.filter(t=>t.status!=="registered").length,o=inst.sbcs.filter(s=>s.status==="offline").length,lb=inst.backups[0];return<Card key={inst.id} hv onClick={()=>onSelect(inst)}>
-        <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:12}}><div><div style={{fontSize:15,fontWeight:600,color:C.txB}}>{inst.name}</div><div style={{fontSize:11,color:C.txM,marginTop:2,fontFamily:M}}>v{inst.version}</div></div><Pill status={inst.status}/></div>
-        <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:4,padding:"12px 0",borderTop:"1px solid "+C.border}}>
-          <Stat l="Trunks" v={`${inst.trunks.length-d}/${inst.trunks.length}`} c={d>0?C.r:C.g}/><Stat l="SBCs" v={`${inst.sbcs.length-o}/${inst.sbcs.length}`} c={o>0?C.r:C.g}/><Stat l="License" v={inst.license.valid?"OK":"⚠"} c={inst.license.valid?C.g:C.r}/><Stat l="Backup" v={lb?ago(lb.date):"-"} c={lb?C.txD:C.y}/>
+
+    {/* SBC Overview */}
+    {s.sbcs.total>0&&<>
+      <div style={{fontSize:14,fontWeight:600,color:C.txB,marginBottom:10}}>SBC Status</div>
+      <Card style={{marginBottom:22,padding:14}}>
+        <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:12}}>
+          <div style={{textAlign:"center"}}><div style={{fontSize:28,fontWeight:700,color:C.g}}>{s.sbcs.online||0}</div><div style={{fontSize:11,color:C.txM}}>Online</div></div>
+          <div style={{textAlign:"center"}}><div style={{fontSize:28,fontWeight:700,color:C.r}}>{s.sbcs.offline||0}</div><div style={{fontSize:11,color:C.txM}}>Offline</div></div>
+          <div style={{textAlign:"center"}}><div style={{fontSize:28,fontWeight:700,color:C.txD}}>{s.sbcs.total||0}</div><div style={{fontSize:11,color:C.txM}}>Total</div></div>
         </div>
-        <div style={{fontSize:11,color:C.txM,marginTop:6,fontFamily:M}}>{inst.base_url} · seen {ago(inst.last_seen)} ago</div>
-      </Card>})}
-    </div>
+        {s.sbcs.offline>0&&<div style={{marginTop:10,textAlign:"center"}}><Btn small variant="ghost" onClick={()=>onNavigate("sbcs")}>View SBC Details</Btn></div>}
+      </Card>
+    </>}
+
+    {/* Problem PBXes */}
+    {(s.problem_pbxes||[]).length>0&&<>
+      <div style={{fontSize:14,fontWeight:600,color:C.txB,marginBottom:10}}>Problem Systems</div>
+      <Card style={{marginBottom:22}}>
+        <Table cols={[
+          {k:"name",l:"PBX",r:v=><span style={{fontWeight:500,color:C.txB}}>{v}</span>},
+          {k:"failures",l:"Failures",r:v=><Pill status={v>3?"critical":v>1?"warning":"info"} label={String(v)}/>},
+          {k:"error",l:"Last Error",r:v=><span style={{fontFamily:M,fontSize:11,color:C.r}}>{v||"\u2014"}</span>},
+        ]} data={s.problem_pbxes}/>
+      </Card>
+    </>}
+
+    {/* Recent Alerts */}
+    {firingAlerts.length>0&&<>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
+        <div style={{fontSize:14,fontWeight:600,color:C.txB}}>Active Alerts</div>
+        <Btn small variant="ghost" onClick={()=>onNavigate("alerts")}>View All</Btn>
+      </div>
+      <Card>
+        <Table cols={[
+          {k:"severity",l:"Severity",r:v=><Pill status={v}/>},
+          {k:"title",l:"Alert",r:v=><span style={{fontWeight:500,color:C.txB}}>{v}</span>},
+          {k:"pbx_name",l:"PBX"},
+          {k:"fired_at",l:"Fired",r:v=>fTime(v)},
+        ]} data={firingAlerts.slice(0,10)}/>
+      </Card>
+    </>}
   </div>;
 }
 
-function Detail({inst,onBack}){const[tab,setTab]=useState("trunks");const tabs=[{id:"trunks",l:"Trunks",n:inst.trunks.length},{id:"sbcs",l:"SBCs",n:inst.sbcs.length},{id:"license",l:"License"},{id:"backups",l:"Backups",n:inst.backups.length},{id:"caps",l:"Capabilities"}];return<div>
-  <Btn variant="ghost" small onClick={onBack} style={{marginBottom:8}}>← Dashboard</Btn>
-  <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:16}}><div><h1 style={{fontSize:22,fontWeight:700,color:C.txB,margin:0}}>{inst.name}</h1><div style={{fontSize:12,color:C.txM,marginTop:2,fontFamily:M}}>{inst.base_url} · v{inst.version} · user: {inst.credential_username}</div></div><Pill status={inst.status}/></div>
-  <div style={{display:"flex",gap:0,marginBottom:16,borderBottom:"1px solid "+C.border}}>{tabs.map(t=><button key={t.id} onClick={()=>setTab(t.id)} style={{padding:"10px 18px",fontSize:13,fontWeight:tab===t.id?600:400,color:tab===t.id?C.txB:C.txM,background:"transparent",border:"none",borderBottom:tab===t.id?"2px solid "+C.ac:"2px solid transparent",cursor:"pointer",fontFamily:F}}>{t.l}{t.n!=null?` (${t.n})`:""}</button>)}</div>
-  {tab==="trunks"&&<Card><Table cols={[{k:"name",l:"Trunk",r:v=><span style={{fontWeight:500,color:C.txB}}>{v}</span>},{k:"status",l:"Status",r:v=><Pill status={v}/>},{k:"provider",l:"Provider"},{k:"last_error",l:"Last Error",r:v=>v?<span style={{color:C.r,fontSize:12,fontFamily:M}}>{v}</span>:"—"},{k:"inbound",l:"In",r:v=>v?<Sv d={iCk} s={14} c={C.g}/>:<Sv d={iX} s={14} c={C.r}/>},{k:"outbound",l:"Out",r:v=>v?<Sv d={iCk} s={14} c={C.g}/>:<Sv d={iX} s={14} c={C.r}/>},{k:"changed",l:"Changed",r:v=><span style={{fontSize:12,fontFamily:M}}>{fTime(v)}</span>}]} data={inst.trunks}/></Card>}
-  {tab==="sbcs"&&<Card><Table cols={[{k:"name",l:"SBC",r:v=><span style={{fontWeight:500,color:C.txB}}>{v}</span>},{k:"status",l:"Status",r:v=><Pill status={v}/>},{k:"tunnel",l:"Tunnel"},{k:"last_seen",l:"Last Seen",r:v=><span style={{fontSize:12,fontFamily:M}}>{fTime(v)}</span>}]} data={inst.sbcs}/></Card>}
-  {tab==="license"&&<Card><div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:20,marginBottom:16}}>{[{l:"Edition",v:inst.license.edition},{l:"Expiry",v:fDate(inst.license.expiry),c:inst.license.valid?C.txB:C.r},{l:"Max Calls",v:inst.license.calls||"—"}].map((s,i)=><div key={i}><div style={{fontSize:10,color:C.txM,textTransform:"uppercase",letterSpacing:".05em",marginBottom:4}}>{s.l}</div><div style={{fontSize:18,fontWeight:600,color:s.c||C.txB,fontFamily:M}}>{s.v}</div></div>)}</div>{inst.license.warnings?.length>0&&<div style={{padding:12,background:C.yB,border:"1px solid rgba(241,196,15,.15)",borderRadius:6,marginTop:12}}>{inst.license.warnings.map((w,i)=><div key={i} style={{fontSize:13,color:C.y}}>⚠ {w}</div>)}</div>}</Card>}
-  {tab==="backups"&&<Card><Table cols={[{k:"name",l:"File",r:v=><span style={{fontWeight:500,color:C.txB,fontFamily:M,fontSize:12}}>{v}</span>},{k:"date",l:"Created",r:v=>fTime(v)},{k:"size",l:"Size",r:v=>fBytes(v)},{k:"type",l:"Type"},{k:"id",l:"",r:()=><Btn small variant="primary"><Sv d={iDl} s={12}/> Download</Btn>}]} data={inst.backups}/></Card>}
-  {tab==="caps"&&<Card><div style={{fontSize:12,color:C.txD,marginBottom:12}}>Discovered during connection probe — refreshed weekly</div><Table cols={[{k:"f",l:"Feature",r:v=><span style={{fontWeight:500,color:C.txB,textTransform:"capitalize"}}>{v.replace(/_/g," ")}</span>},{k:"s",l:"Status",r:v=><Pill status={v}/>}]} data={Object.entries(inst.caps).map(([f,s])=>({f,s}))}/></Card>}
-</div>}
+/* ═══════════════════════════════════════════════════════════════════════════
+   SYSTEMS PAGE (list)
+   ═══════════════════════════════════════════════════════════════════════════ */
+function SystemsPage({onSelect,onAdd}){
+  const[data,setData]=useState({instances:[],total:0,page:1,pages:1});
+  const[search,setSearch]=useState("");
+  const[page,setPageN]=useState(1);
+  const[loading,setLoading]=useState(true);
+  const[error,setError]=useState("");
+  const[deleting,setDeleting]=useState(null);
+  const searchTimer=useRef(null);
 
-function AlertsPage(){const active=ALERTS.filter(a=>a.state==="active");return<div>
-  <h1 style={{fontSize:22,fontWeight:700,color:C.txB,margin:"0 0 4px"}}>Alerts</h1><p style={{fontSize:13,color:C.txM,margin:"0 0 20px"}}>{active.length} active</p>
-  <Card><Table cols={[{k:"sev",l:"Severity",r:v=><Pill status={v}/>},{k:"title",l:"Alert",r:v=><span style={{fontWeight:500,color:C.txB}}>{v}</span>},{k:"pbx",l:"PBX"},{k:"time",l:"Triggered",r:v=>fTime(v)},{k:"id",l:"",r:()=><Btn small variant="ghost">Ack</Btn>}]} data={active}/></Card>
-</div>}
+  const load=useCallback(async(pg=page,q=search)=>{
+    try{const d=await api.get(`/pbx/instances?page=${pg}&per_page=50${q?`&search=${encodeURIComponent(q)}`:""}`);setData(d||{instances:[],total:0,page:1,pages:1});setError("");}
+    catch{setError("Failed to load systems");}
+    finally{setLoading(false);}
+  },[page,search]);
 
-function BackupsPage({instances}){const all=instances.flatMap(i=>i.backups.map(b=>({...b,pbx:i.name})));return<div>
-  <h1 style={{fontSize:22,fontWeight:700,color:C.txB,margin:"0 0 4px"}}>Backups</h1><p style={{fontSize:13,color:C.txM,margin:"0 0 20px"}}>{all.length} across all instances</p>
-  <Card><Table cols={[{k:"pbx",l:"PBX",r:v=><span style={{fontWeight:500,color:C.txB}}>{v}</span>},{k:"name",l:"File",r:v=><span style={{fontFamily:M,fontSize:12}}>{v}</span>},{k:"date",l:"Created",r:v=>fTime(v)},{k:"size",l:"Size",r:v=>fBytes(v)},{k:"type",l:"Type"},{k:"id",l:"",r:()=><Btn small variant="primary"><Sv d={iDl} s={12}/> Download</Btn>}]} data={all}/></Card>
-</div>}
+  useEffect(()=>{load();},[load]);
 
-function AuditPage(){return<div>
-  <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:20}}><div><h1 style={{fontSize:22,fontWeight:700,color:C.txB,margin:0}}>Audit Log</h1><p style={{fontSize:13,color:C.txM,margin:"3px 0 0"}}>{AUDIT.length} entries</p></div><Btn small>Export CSV</Btn></div>
-  <Card><Table cols={[{k:"time",l:"Time",r:v=><span style={{fontSize:12,fontFamily:M}}>{fTime(v)}</span>},{k:"action",l:"Action",r:v=><span style={{fontSize:12,fontFamily:M,color:C.ac}}>{v}</span>},{k:"user",l:"User",r:v=><span style={{fontWeight:500,color:C.txB}}>{v}</span>},{k:"target",l:"Target"},{k:"detail",l:"Detail"},{k:"ok",l:"Result",r:v=>v?<Pill status="pass" label="OK"/>:<Pill status="fail" label="FAIL"/>}]} data={AUDIT}/></Card>
-</div>}
+  const onSearch=(v)=>{setSearch(v);clearTimeout(searchTimer.current);searchTimer.current=setTimeout(()=>{setPageN(1);load(1,v);},300);};
+  const goPage=(p)=>{setPageN(p);load(p);};
 
-function SettingsPage(){return<div>
-  <h1 style={{fontSize:22,fontWeight:700,color:C.txB,margin:"0 0 20px"}}>Settings</h1>
-  <div style={{display:"grid",gap:12}}>
-    <Card><div style={{fontSize:14,fontWeight:600,color:C.txB,marginBottom:12}}>Security</div><div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:14,fontSize:13,color:C.txD}}><div><span style={{color:C.txM}}>Encryption:</span> AES-256-GCM</div><div><span style={{color:C.txM}}>Key source:</span> MASTER_KEY env var</div><div><span style={{color:C.txM}}>JWT expiry:</span> 60 min</div><div><span style={{color:C.txM}}>Login lockout:</span> 5 attempts / 15 min</div></div></Card>
-    <Card><div style={{fontSize:14,fontWeight:600,color:C.txB,marginBottom:12}}>Polling</div><div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:14,fontSize:13,color:C.txD}}><div><span style={{color:C.txM}}>Default interval:</span> 60s</div><div><span style={{color:C.txM}}>Max backoff:</span> 600s</div><div><span style={{color:C.txM}}>Alert check:</span> 30s</div><div><span style={{color:C.txM}}>Capability reprobe:</span> Weekly</div></div></Card>
-    <Card><div style={{fontSize:14,fontWeight:600,color:C.txB,marginBottom:12}}>Database</div><div style={{fontSize:13,color:C.txD}}><div style={{fontFamily:M,fontSize:12,color:C.txM}}>PostgreSQL 16 · Audit log: immutable (trigger-protected) · Poll history: 90-day retention</div></div></Card>
-  </div>
-</div>}
+  const deleteInst=async(id,name)=>{
+    if(!confirm(`Delete system "${name}"? This cannot be undone.`))return;
+    setDeleting(id);
+    try{await api.del("/pbx/instances/"+id);load();}
+    catch{alert("Delete failed");}
+    finally{setDeleting(null);}
+  };
+
+  if(loading&&data.instances.length===0)return<PageLoader/>;
+
+  return<div>
+    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:16}}>
+      <div><h1 style={{fontSize:22,fontWeight:700,color:C.txB,margin:0}}>Systems</h1><p style={{fontSize:13,color:C.txM,margin:"3px 0 0"}}>{data.total} PBX system{data.total!==1?"s":""}</p></div>
+      <div style={{display:"flex",gap:8}}><Btn variant="ghost" small onClick={()=>load()}><Sv d={iRf} s={14}/> Refresh</Btn><Btn variant="accent" onClick={onAdd}><Sv d={iP} s={14}/> Add System</Btn></div>
+    </div>
+    <div style={{marginBottom:14}}><Input placeholder="Search by name or URL..." value={search} onChange={onSearch}/></div>
+    {error&&<ErrorMsg msg={error} onRetry={()=>load()}/>}
+    <Card>
+      <Table cols={[
+        {k:"name",l:"Name",r:(v,r)=><span style={{fontWeight:600,color:C.txB,cursor:"pointer"}} onClick={()=>onSelect(r.id)}>{v}</span>},
+        {k:"base_url",l:"URL",r:v=><span style={{fontFamily:M,fontSize:11}}>{v}</span>},
+        {k:"detected_version",l:"Version",r:v=><span style={{fontFamily:M,fontSize:11}}>{v||"\u2014"}</span>},
+        {k:"status",l:"Status",r:(v,r)=><Pill status={r.is_enabled?(r.consecutive_failures>0?"warning":"healthy"):"offline"} label={r.is_enabled?(r.consecutive_failures>0?"degraded":"healthy"):"disabled"}/>},
+        {k:"last_poll_at",l:"Last Poll",r:v=>ago(v)},
+        {k:"actions",l:"",r:(v,r)=><div style={{display:"flex",gap:4}} onClick={e=>e.stopPropagation()}>
+          <Btn small variant="ghost" onClick={()=>onSelect(r.id)}><Sv d={iEye} s={13}/></Btn>
+          <Btn small variant="ghost" onClick={()=>deleteInst(r.id,r.name)} loading={deleting===r.id}><Sv d={iTrash} s={13} c={C.r}/></Btn>
+        </div>},
+      ]} data={data.instances}/>
+    </Card>
+    {data.pages>1&&<div style={{display:"flex",justifyContent:"center",gap:6,marginTop:14}}>
+      <Btn small variant="ghost" onClick={()=>goPage(Math.max(1,data.page-1))} disabled={data.page<=1}>Prev</Btn>
+      <span style={{fontSize:12,color:C.txD,padding:"6px 10px"}}>Page {data.page} of {data.pages}</span>
+      <Btn small variant="ghost" onClick={()=>goPage(Math.min(data.pages,data.page+1))} disabled={data.page>=data.pages}>Next</Btn>
+    </div>}
+  </div>;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   SYSTEM DETAIL PAGE
+   ═══════════════════════════════════════════════════════════════════════════ */
+function DetailPage({instanceId,onBack}){
+  const[status,setStatus]=useState(null);
+  const[loading,setLoading]=useState(true);
+  const[error,setError]=useState("");
+  const[tab,setTab]=useState("trunks");
+  const[polling,setPolling]=useState(false);
+  const[showEdit,setShowEdit]=useState(false);
+  const[backups,setBackups]=useState([]);
+
+  const load=useCallback(async()=>{
+    try{
+      const[s,bk]=await Promise.all([
+        api.get("/pbx/instances/"+instanceId+"/status"),
+        api.get("/backups?pbx_id="+instanceId),
+      ]);
+      setStatus(s);setBackups(bk||[]);setError("");
+    }catch{setError("Failed to load system status");}
+    finally{setLoading(false);}
+  },[instanceId]);
+
+  useEffect(()=>{load();},[load]);
+
+  const doPoll=async()=>{
+    setPolling(true);
+    try{await api.post("/pbx/instances/"+instanceId+"/poll");setTimeout(load,3000);}
+    catch{alert("Poll failed");}
+    finally{setPolling(false);}
+  };
+
+  if(loading)return<PageLoader/>;
+  if(error)return<><Btn variant="ghost" small onClick={onBack} style={{marginBottom:8}}>Back to Systems</Btn><ErrorMsg msg={error} onRetry={load}/></>;
+  if(!status)return<ErrorMsg msg="System not found"/>;
+
+  const pbx=status.pbx||{};
+  const trunks=status.trunks||[];
+  const sbcs=status.sbcs||[];
+  const lic=status.license||{};
+  const caps=status.capabilities||[];
+  const tabs=[{id:"trunks",l:"Trunks",n:trunks.length},{id:"sbcs",l:"SBCs",n:sbcs.length},{id:"license",l:"License"},{id:"backups",l:"Backups",n:backups.length},{id:"caps",l:"Capabilities",n:caps.length}];
+
+  return<div>
+    <Btn variant="ghost" small onClick={onBack} style={{marginBottom:8}}>Back to Systems</Btn>
+    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:16}}>
+      <div>
+        <h1 style={{fontSize:22,fontWeight:700,color:C.txB,margin:0}}>{pbx.name}</h1>
+        <div style={{fontSize:12,color:C.txM,marginTop:2,fontFamily:M}}>{pbx.base_url} | v{pbx.detected_version||"?"} | poll: {pbx.poll_interval_s}s</div>
+      </div>
+      <div style={{display:"flex",gap:8,alignItems:"center"}}>
+        <Pill status={status.overall_health||"unknown"}/>
+        <Btn small variant="default" onClick={doPoll} loading={polling}><Sv d={iRf} s={14}/> Poll Now</Btn>
+        <Btn small variant="ghost" onClick={()=>setShowEdit(true)}><Sv d={iEdit} s={14}/> Edit</Btn>
+      </div>
+    </div>
+
+    {pbx.last_error&&<div style={{marginBottom:12,padding:10,background:C.rB,borderRadius:6,fontSize:12,color:C.r,fontFamily:M}}>Last error: {pbx.last_error}</div>}
+
+    <div style={{display:"flex",gap:0,marginBottom:16,borderBottom:"1px solid "+C.border}}>
+      {tabs.map(t=><button key={t.id} onClick={()=>setTab(t.id)} style={{padding:"10px 18px",fontSize:13,fontWeight:tab===t.id?600:400,color:tab===t.id?C.txB:C.txM,background:"transparent",border:"none",borderBottom:tab===t.id?"2px solid "+C.ac:"2px solid transparent",cursor:"pointer",fontFamily:F}}>{t.l}{t.n!=null?` (${t.n})`:""}</button>)}
+    </div>
+
+    {tab==="trunks"&&<Card><Table cols={[
+      {k:"trunk_name",l:"Trunk",r:v=><span style={{fontWeight:500,color:C.txB}}>{v}</span>},
+      {k:"status",l:"Status",r:v=><Pill status={v}/>},
+      {k:"provider",l:"Provider"},
+      {k:"last_error",l:"Last Error",r:v=>v?<span style={{color:C.r,fontSize:12,fontFamily:M}}>{v}</span>:"\u2014"},
+      {k:"inbound_enabled",l:"In",r:v=>v?<Sv d={iCk} s={14} c={C.g}/>:<Sv d={iX} s={14} c={C.r}/>},
+      {k:"outbound_enabled",l:"Out",r:v=>v?<Sv d={iCk} s={14} c={C.g}/>:<Sv d={iX} s={14} c={C.r}/>},
+      {k:"last_status_change",l:"Changed",r:v=><span style={{fontSize:12,fontFamily:M}}>{fTime(v)}</span>},
+    ]} data={trunks}/></Card>}
+
+    {tab==="sbcs"&&<Card><Table cols={[
+      {k:"sbc_name",l:"SBC",r:v=><span style={{fontWeight:500,color:C.txB}}>{v}</span>},
+      {k:"status",l:"Status",r:v=><Pill status={v}/>},
+      {k:"tunnel_status",l:"Tunnel"},
+      {k:"last_seen",l:"Last Seen",r:v=><span style={{fontSize:12,fontFamily:M}}>{fTime(v)}</span>},
+    ]} data={sbcs}/></Card>}
+
+    {tab==="license"&&<Card>
+      <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:20,marginBottom:16}}>
+        {[{l:"Edition",v:lic.edition||"\u2014"},{l:"Expiry",v:fDate(lic.expiry_date),c:lic.is_valid?C.txB:C.r},{l:"Max Calls",v:lic.max_sim_calls||"\u2014"}].map((s,i)=><div key={i}>
+          <div style={{fontSize:10,color:C.txM,textTransform:"uppercase",letterSpacing:".05em",marginBottom:4}}>{s.l}</div>
+          <div style={{fontSize:18,fontWeight:600,color:s.c||C.txB,fontFamily:M}}>{s.v}</div>
+        </div>)}
+      </div>
+      {lic.warnings?.length>0&&<div style={{padding:12,background:C.yB,border:"1px solid rgba(241,196,15,.15)",borderRadius:6,marginTop:12}}>
+        {lic.warnings.map((w,i)=><div key={i} style={{fontSize:13,color:C.y}}>Warning: {w}</div>)}
+      </div>}
+    </Card>}
+
+    {tab==="backups"&&<Card><Table cols={[
+      {k:"filename",l:"File",r:v=><span style={{fontWeight:500,color:C.txB,fontFamily:M,fontSize:12}}>{v}</span>},
+      {k:"created_on_pbx",l:"Created on PBX",r:v=>fTime(v)},
+      {k:"downloaded_at",l:"Downloaded",r:v=>fTime(v)},
+      {k:"size_bytes",l:"Size",r:v=>fBytes(v)},
+      {k:"backup_type",l:"Type"},
+      {k:"is_downloaded",l:"Local",r:v=>v?<Sv d={iCk} s={14} c={C.g}/>:<Sv d={iX} s={14} c={C.txM}/>},
+    ]} data={backups}/></Card>}
+
+    {tab==="caps"&&<Card>
+      <div style={{fontSize:12,color:C.txD,marginBottom:12}}>Discovered during connection probe</div>
+      <Table cols={[
+        {k:"feature",l:"Feature",r:v=><span style={{fontWeight:500,color:C.txB,textTransform:"capitalize"}}>{v.replace(/_/g," ")}</span>},
+        {k:"status",l:"Status",r:v=><Pill status={v}/>},
+        {k:"method",l:"Method",r:v=><span style={{fontSize:12,fontFamily:M}}>{v||"\u2014"}</span>},
+      ]} data={caps}/>
+    </Card>}
+
+    {showEdit&&<EditInstanceModal inst={pbx} onClose={()=>setShowEdit(false)} onSave={load}/>}
+  </div>;
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   PHONE NUMBERS PAGE
+   ═══════════════════════════════════════════════════════════════════════════ */
+function PhoneNumbersPage(){
+  const[numbers,setNumbers]=useState([]);
+  const[summary,setSummary]=useState({});
+  const[instances,setInstances]=useState([]);
+  const[loading,setLoading]=useState(true);
+  const[error,setError]=useState("");
+  const[syncing,setSyncing]=useState(null);
+  const[showReport,setShowReport]=useState(false);
+  const[report,setReport]=useState(null);
+  const[filters,setFilters]=useState({pbx:"",trunk:"",type:"",search:""});
+
+  const load=useCallback(async()=>{
+    try{
+      const[nums,sum,inst]=await Promise.all([
+        api.get("/phone-numbers"),
+        api.get("/phone-numbers/summary").catch(()=>({})),
+        api.get("/pbx/instances?per_page=200"),
+      ]);
+      setNumbers(nums||[]);setSummary(sum||{});setInstances(inst?.instances||[]);setError("");
+    }catch{setError("Failed to load phone numbers");}
+    finally{setLoading(false);}
+  },[]);
+
+  useEffect(()=>{load();},[load]);
+
+  const syncPbx=async(pbxId)=>{
+    setSyncing(pbxId);
+    try{await api.post("/phone-numbers/sync/"+pbxId);setTimeout(load,2000);}
+    catch{alert("Sync failed");}
+    finally{setSyncing(null);}
+  };
+
+  const syncAll=async()=>{
+    setSyncing("all");
+    try{await api.post("/phone-numbers/sync-all");setTimeout(load,3000);}
+    catch{alert("Sync failed");}
+    finally{setSyncing(null);}
+  };
+
+  const loadReport=async()=>{
+    try{const r=await api.get("/phone-numbers/report");setReport(r);setShowReport(true);}
+    catch{alert("Failed to generate report");}
+  };
+
+  if(loading)return<PageLoader/>;
+
+  const filtered=(numbers||[]).filter(n=>{
+    if(filters.pbx&&n.pbx_id!==filters.pbx)return false;
+    if(filters.type&&n.number_type!==filters.type)return false;
+    if(filters.search){
+      const s=filters.search.toLowerCase();
+      if(!(n.number||"").toLowerCase().includes(s)&&!(n.display_name||"").toLowerCase().includes(s))return false;
+    }
+    return true;
+  });
+
+  const types=[...new Set((numbers||[]).map(n=>n.number_type).filter(Boolean))];
+
+  return<div>
+    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:22}}>
+      <div><h1 style={{fontSize:22,fontWeight:700,color:C.txB,margin:0}}>Phone Numbers</h1><p style={{fontSize:13,color:C.txM,margin:"3px 0 0"}}>{summary.total||numbers.length} numbers across {instances.length} systems</p></div>
+      <div style={{display:"flex",gap:8}}>
+        <Btn small variant="ghost" onClick={loadReport}>Report</Btn>
+        <Btn small variant="default" onClick={async()=>{try{const r=await fetch(API+"/phone-numbers/export"+(filters.pbx?"?pbx_id="+filters.pbx:""),{headers:headers()});if(!r.ok)throw new Error();const blob=await r.blob();const a=document.createElement("a");a.href=URL.createObjectURL(blob);a.download="phone_numbers.csv";a.click();URL.revokeObjectURL(a.href);}catch{alert("Export failed");}}}>Export CSV</Btn>
+        <Btn small variant="default" onClick={syncAll} loading={syncing==="all"}><Sv d={iRf} s={14}/> Sync All</Btn>
+      </div>
+    </div>
+    {error&&<ErrorMsg msg={error} onRetry={load}/>}
+
+    {/* Summary stats */}
+    <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:10,marginBottom:18}}>
+      <Card style={{padding:14,display:"flex",justifyContent:"center"}}><Stat l="Total Numbers" v={summary.total||numbers.length} c={C.b}/></Card>
+      <Card style={{padding:14,display:"flex",justifyContent:"center"}}><Stat l="DIDs" v={summary.did_count||(numbers||[]).filter(n=>n.number_type==="did").length} c={C.txB}/></Card>
+      <Card style={{padding:14,display:"flex",justifyContent:"center"}}><Stat l="Systems" v={summary.pbx_count||instances.length} c={C.txB}/></Card>
+      <Card style={{padding:14,display:"flex",justifyContent:"center"}}><Stat l="Trunks" v={summary.trunk_count||"--"} c={C.txB}/></Card>
+    </div>
+
+    {/* Per-PBX sync buttons */}
+    {instances.length>0&&<div style={{display:"flex",gap:8,marginBottom:16,flexWrap:"wrap"}}>
+      {instances.map(inst=><Btn key={inst.id} small variant="ghost" onClick={()=>syncPbx(inst.id)} loading={syncing===inst.id}><Sv d={iRf} s={12}/> Sync {inst.name}</Btn>)}
+    </div>}
+
+    {/* Filters */}
+    <Card style={{marginBottom:16,padding:14}}>
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr 2fr",gap:12}}>
+        <Select label="PBX" value={filters.pbx} onChange={v=>setFilters(p=>({...p,pbx:v}))} options={[{v:"",l:"All Systems"},...instances.map(i=>({v:i.id,l:i.name}))]}/>
+        <Select label="Type" value={filters.type} onChange={v=>setFilters(p=>({...p,type:v}))} options={[{v:"",l:"All Types"},...types.map(t=>({v:t,l:t.toUpperCase()}))]}/>
+        <div/>
+        <Input label="Search" value={filters.search} onChange={v=>setFilters(p=>({...p,search:v}))} placeholder="Search number or name..."/>
+      </div>
+    </Card>
+
+    <Card>
+      <Table cols={[
+        {k:"number",l:"Phone Number",r:v=><span style={{fontWeight:600,color:C.txB,fontFamily:M}}>{v}</span>},
+        {k:"display_name",l:"Display Name"},
+        {k:"pbx_name",l:"PBX",r:(v,r)=>{const inst=instances.find(i=>i.id===r.pbx_id);return inst?.name||r.pbx_id;}},
+        {k:"trunk_name",l:"Trunk"},
+        {k:"number_type",l:"Type",r:v=><Pill status={v==="did"?"info":"skip"} label={v||"--"}/>},
+        {k:"inbound_route",l:"Inbound Route"},
+        {k:"outbound_cid",l:"Outbound CID",r:v=>v?<Sv d={iCk} s={14} c={C.g}/>:<Sv d={iX} s={14} c={C.txM}/>},
+      ]} data={filtered}/>
+    </Card>
+
+    {showReport&&report&&<Modal onClose={()=>setShowReport(false)} title="Phone Number Report" width={700}>
+      <div style={{fontSize:13,color:C.txD,whiteSpace:"pre-wrap",fontFamily:M,maxHeight:500,overflow:"auto"}}>
+        {typeof report==="string"?report:JSON.stringify(report,null,2)}
+      </div>
+      <div style={{display:"flex",justifyContent:"flex-end",marginTop:16}}><Btn variant="ghost" onClick={()=>setShowReport(false)}>Close</Btn></div>
+    </Modal>}
+  </div>;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   BACKUPS PAGE
+   ═══════════════════════════════════════════════════════════════════════════ */
+function BackupsPage(){
+  const[backups,setBackups]=useState([]);
+  const[instances,setInstances]=useState([]);
+  const[schedules,setSchedules]=useState({});
+  const[loading,setLoading]=useState(true);
+  const[error,setError]=useState("");
+  const[actionLoading,setActionLoading]=useState(null);
+  const[editSchedule,setEditSchedule]=useState(null);
+
+  const load=useCallback(async()=>{
+    try{
+      const[bk,inst]=await Promise.all([
+        api.get("/backups?limit=200"),
+        api.get("/pbx/instances?per_page=200"),
+      ]);
+      const instList=inst?.instances||[];
+      setBackups(bk||[]);setInstances(instList);
+      // Load schedules for each PBX
+      const sMap={};
+      await Promise.all((instList).map(async(i)=>{
+        try{const s=await api.get("/backups/"+i.id+"/schedule");sMap[i.id]=s;}catch{}
+      }));
+      setSchedules(sMap);
+      setError("");
+    }catch{setError("Failed to load backups");}
+    finally{setLoading(false);}
+  },[]);
+
+  useEffect(()=>{load();},[load]);
+
+  const pullLatest=async(pbxId)=>{
+    setActionLoading("pull-"+pbxId);
+    try{await api.post("/backups/"+pbxId+"/pull");setTimeout(load,3000);}
+    catch{alert("Pull failed");}
+    finally{setActionLoading(null);}
+  };
+  const triggerBackup=async(pbxId)=>{
+    setActionLoading("trigger-"+pbxId);
+    try{await api.post("/backups/"+pbxId+"/trigger");setTimeout(load,5000);}
+    catch{alert("Trigger failed");}
+    finally{setActionLoading(null);}
+  };
+
+  if(loading)return<PageLoader/>;
+
+  const pbxMap=Object.fromEntries(instances.map(i=>[i.id,i.name]));
+
+  return<div>
+    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:22}}>
+      <div><h1 style={{fontSize:22,fontWeight:700,color:C.txB,margin:0}}>Backups</h1><p style={{fontSize:13,color:C.txM,margin:"3px 0 0"}}>{backups.length} backups across {instances.length} systems</p></div>
+      <Btn variant="ghost" small onClick={load}><Sv d={iRf} s={14}/> Refresh</Btn>
+    </div>
+    {error&&<ErrorMsg msg={error} onRetry={load}/>}
+
+    {/* Per-PBX Status Cards */}
+    <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(320px,1fr))",gap:12,marginBottom:22}}>
+      {instances.map(inst=>{
+        const myBackups=backups.filter(b=>b.pbx_id===inst.id);
+        const latest=myBackups[0];
+        const sched=schedules[inst.id]||{};
+        const latestDate=latest?.downloaded_at||latest?.created_on_pbx;
+        const ageH=latestDate?Math.floor((Date.now()-new Date(latestDate).getTime())/3600000):null;
+        return<Card key={inst.id}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:10}}>
+            <div><div style={{fontSize:14,fontWeight:600,color:C.txB}}>{inst.name}</div><div style={{fontSize:11,color:C.txM,marginTop:2}}>{myBackups.length} backups</div></div>
+            <Pill status={ageH===null?"warning":ageH>24?"error":"healthy"} label={ageH===null?"No backups":ageH>24?"Stale":"OK"}/>
+          </div>
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,fontSize:12,color:C.txD,marginBottom:10}}>
+            <div><span style={{color:C.txM}}>Last:</span> {fTime(latestDate)}</div>
+            <div><span style={{color:C.txM}}>Size:</span> {fBytes(latest?.size_bytes)}</div>
+            <div><span style={{color:C.txM}}>Schedule:</span> {sched.exists?sched.cron_expr:"None"}</div>
+            <div><span style={{color:C.txM}}>Next:</span> {sched.next_run_at?fTime(sched.next_run_at):"\u2014"}</div>
+          </div>
+          <div style={{display:"flex",gap:6}}>
+            <Btn small variant="primary" onClick={()=>pullLatest(inst.id)} loading={actionLoading==="pull-"+inst.id}><Sv d={iDl} s={12}/> Pull Latest</Btn>
+            <Btn small variant="default" onClick={()=>triggerBackup(inst.id)} loading={actionLoading==="trigger-"+inst.id}>Trigger Backup</Btn>
+            <Btn small variant="ghost" onClick={()=>setEditSchedule(inst.id)}>Schedule</Btn>
+          </div>
+        </Card>;
+      })}
+    </div>
+
+    {/* All Backups Table */}
+    <div style={{fontSize:14,fontWeight:600,color:C.txB,marginBottom:10}}>All Backups</div>
+    <Card>
+      <Table cols={[
+        {k:"pbx_id",l:"PBX",r:v=><span style={{fontWeight:500,color:C.txB}}>{pbxMap[v]||v}</span>},
+        {k:"filename",l:"File",r:v=><span style={{fontFamily:M,fontSize:12}}>{v}</span>},
+        {k:"created_on_pbx",l:"Created",r:v=>fTime(v)},
+        {k:"downloaded_at",l:"Downloaded",r:v=>fTime(v)},
+        {k:"size_bytes",l:"Size",r:v=>fBytes(v)},
+        {k:"backup_type",l:"Type"},
+        {k:"is_downloaded",l:"Local",r:v=>v?<Pill status="pass" label="Yes"/>:<Pill status="skip" label="No"/>},
+      ]} data={backups}/>
+    </Card>
+
+    {/* Schedule Edit Modal */}
+    {editSchedule&&<BackupScheduleModal pbxId={editSchedule} current={schedules[editSchedule]} onClose={()=>setEditSchedule(null)} onSave={load}/>}
+  </div>;
+}
+
+function BackupScheduleModal({pbxId,current,onClose,onSave}){
+  const[form,setForm]=useState({
+    cron_expr:current?.cron_expr||"0 2 * * *",
+    retain_count:current?.retain_count||10,
+    retain_days:current?.retain_days||90,
+    encrypt_at_rest:current?.encrypt_at_rest||false,
+    is_enabled:current?.is_enabled!==false,
+  });
+  const[saving,setSaving]=useState(false);
+  const upd=(k,v)=>setForm(p=>({...p,[k]:v}));
+
+  const save=async()=>{
+    setSaving(true);
+    try{
+      await api.put("/backups/"+pbxId+"/schedule",form);
+      onSave();onClose();
+    }catch(err){
+      let msg="Save failed";try{const b=await err.json();msg=b.detail||msg;}catch{}
+      alert(msg);
+    }finally{setSaving(false);}
+  };
+
+  return<Modal onClose={onClose} title="Backup Schedule" subtitle="Configure automatic backup schedule">
+    <Input label="Cron Expression" value={form.cron_expr} onChange={v=>upd("cron_expr",v)} mono placeholder="0 2 * * *" help="Standard cron format: minute hour day month weekday"/>
+    <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:14}}>
+      <Input label="Retain Count" value={form.retain_count} onChange={v=>upd("retain_count",parseInt(v)||0)} type="number" help="Keep last N backups"/>
+      <Input label="Retain Days" value={form.retain_days} onChange={v=>upd("retain_days",parseInt(v)||0)} type="number" help="Delete backups older than N days"/>
+    </div>
+    <div style={{marginBottom:16,display:"flex",gap:16}}>
+      <label style={{display:"flex",alignItems:"center",gap:8,cursor:"pointer"}}><input type="checkbox" checked={form.is_enabled} onChange={e=>upd("is_enabled",e.target.checked)} style={{accentColor:C.ac}}/><span style={{fontSize:13,color:C.txB}}>Enabled</span></label>
+      <label style={{display:"flex",alignItems:"center",gap:8,cursor:"pointer"}}><input type="checkbox" checked={form.encrypt_at_rest} onChange={e=>upd("encrypt_at_rest",e.target.checked)} style={{accentColor:C.ac}}/><span style={{fontSize:13,color:C.txB}}>Encrypt at Rest</span></label>
+    </div>
+    <div style={{display:"flex",justifyContent:"flex-end",gap:10,paddingTop:12,borderTop:"1px solid "+C.border}}>
+      <Btn variant="ghost" onClick={onClose}>Cancel</Btn>
+      <Btn variant="primary" onClick={save} loading={saving}>Save Schedule</Btn>
+    </div>
+  </Modal>;
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   ALERTS PAGE
+   ═══════════════════════════════════════════════════════════════════════════ */
+function AlertsPage(){
+  const[alerts,setAlerts]=useState([]);
+  const[instances,setInstances]=useState([]);
+  const[loading,setLoading]=useState(true);
+  const[error,setError]=useState("");
+  const[stateFilter,setStateFilter]=useState("");
+  const[pbxFilter,setPbxFilter]=useState("");
+  const[acking,setAcking]=useState(null);
+
+  const load=useCallback(async()=>{
+    try{
+      let url="/alerts?limit=200";
+      if(stateFilter)url+="&state="+stateFilter;
+      if(pbxFilter)url+="&pbx_id="+pbxFilter;
+      const[al,inst]=await Promise.all([api.get(url),api.get("/pbx/instances?per_page=200")]);
+      setAlerts(al||[]);setInstances(inst?.instances||[]);setError("");
+    }catch{setError("Failed to load alerts");}
+    finally{setLoading(false);}
+  },[stateFilter,pbxFilter]);
+
+  useEffect(()=>{load();},[load]);
+
+  const ack=async(id)=>{
+    setAcking(id);
+    try{await api.post("/alerts/"+id+"/acknowledge");load();}
+    catch{alert("Acknowledge failed");}
+    finally{setAcking(null);}
+  };
+
+  const firingCount=(alerts||[]).filter(a=>a.state==="firing").length;
+
+  return<div>
+    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:22}}>
+      <div><h1 style={{fontSize:22,fontWeight:700,color:C.txB,margin:0}}>Alerts</h1><p style={{fontSize:13,color:C.txM,margin:"3px 0 0"}}>{firingCount} firing, {alerts.length} total</p></div>
+      <Btn variant="ghost" small onClick={load}><Sv d={iRf} s={14}/> Refresh</Btn>
+    </div>
+    {error&&<ErrorMsg msg={error} onRetry={load}/>}
+
+    {/* Filters */}
+    <Card style={{marginBottom:16,padding:14}}>
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 2fr",gap:12}}>
+        <Select label="State" value={stateFilter} onChange={v=>{setStateFilter(v);setLoading(true);}} options={[{v:"",l:"All States"},{v:"firing",l:"Firing"},{v:"acknowledged",l:"Acknowledged"},{v:"resolved",l:"Resolved"}]}/>
+        <Select label="PBX" value={pbxFilter} onChange={v=>{setPbxFilter(v);setLoading(true);}} options={[{v:"",l:"All Systems"},...instances.map(i=>({v:i.id,l:i.name}))]}/>
+        <div/>
+      </div>
+    </Card>
+
+    {loading?<PageLoader/>:<Card>
+      <Table cols={[
+        {k:"severity",l:"Severity",r:v=><Pill status={v}/>},
+        {k:"state",l:"State",r:v=><Pill status={v}/>},
+        {k:"title",l:"Alert",r:v=><span style={{fontWeight:500,color:C.txB}}>{v}</span>},
+        {k:"pbx_name",l:"PBX"},
+        {k:"fired_at",l:"Fired",r:v=><span style={{fontSize:12,fontFamily:M}}>{fTime(v)}</span>},
+        {k:"resolved_at",l:"Resolved",r:v=>v?<span style={{fontSize:12,fontFamily:M}}>{fTime(v)}</span>:"\u2014"},
+        {k:"id",l:"",r:(v,r)=>r.state==="firing"?<Btn small variant="ghost" onClick={()=>ack(v)} loading={acking===v}>Ack</Btn>:null},
+      ]} data={alerts}/>
+    </Card>}
+  </div>;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   AUDIT LOG PAGE
+   ═══════════════════════════════════════════════════════════════════════════ */
+function AuditPage(){
+  const[entries,setEntries]=useState([]);
+  const[total,setTotal]=useState(0);
+  const[loading,setLoading]=useState(true);
+  const[error,setError]=useState("");
+  const[offset,setOffset]=useState(0);
+  const[filters,setFilters]=useState({action:"",target_type:"",success:""});
+  const limit=50;
+
+  const load=useCallback(async()=>{
+    try{
+      let url=`/audit?limit=${limit}&offset=${offset}`;
+      if(filters.action)url+="&action="+filters.action;
+      if(filters.target_type)url+="&target_type="+filters.target_type;
+      if(filters.success!=="")url+="&success="+filters.success;
+      const res=await api.get(url);
+      setEntries(res.entries||[]);setTotal(res.total||0);setError("");
+    }catch{setError("Failed to load audit log");}
+    finally{setLoading(false);}
+  },[offset,filters]);
+
+  useEffect(()=>{load();},[load]);
+
+  const exportCsv=async()=>{
+    let url="/audit/export?";
+    if(filters.action)url+="action="+filters.action+"&";
+    if(filters.target_type)url+="target_type="+filters.target_type+"&";
+    try{
+      const r=await fetch(API+url,{headers:headers()});
+      if(!r.ok)throw new Error();
+      const blob=await r.blob();
+      const a=document.createElement("a");a.href=URL.createObjectURL(blob);a.download="audit_export.csv";a.click();URL.revokeObjectURL(a.href);
+    }catch{alert("Export failed");}
+  };
+
+  const totalPages=Math.ceil(total/limit);
+  const currentPage=Math.floor(offset/limit)+1;
+
+  return<div>
+    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:22}}>
+      <div><h1 style={{fontSize:22,fontWeight:700,color:C.txB,margin:0}}>Audit Log</h1><p style={{fontSize:13,color:C.txM,margin:"3px 0 0"}}>{total} entries</p></div>
+      <div style={{display:"flex",gap:8}}><Btn small onClick={exportCsv}>Export CSV</Btn><Btn variant="ghost" small onClick={()=>{setOffset(0);setLoading(true);}}><Sv d={iRf} s={14}/> Refresh</Btn></div>
+    </div>
+    {error&&<ErrorMsg msg={error} onRetry={load}/>}
+
+    {/* Filters */}
+    <Card style={{marginBottom:16,padding:14}}>
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:12}}>
+        <Input label="Action" value={filters.action} onChange={v=>{setFilters(p=>({...p,action:v}));setOffset(0);setLoading(true);}} placeholder="e.g. user_login"/>
+        <Input label="Target Type" value={filters.target_type} onChange={v=>{setFilters(p=>({...p,target_type:v}));setOffset(0);setLoading(true);}} placeholder="e.g. pbx, user"/>
+        <Select label="Result" value={filters.success} onChange={v=>{setFilters(p=>({...p,success:v}));setOffset(0);setLoading(true);}} options={[{v:"",l:"All"},{v:"true",l:"Success"},{v:"false",l:"Failed"}]}/>
+      </div>
+    </Card>
+
+    {loading?<PageLoader/>:<Card>
+      <Table cols={[
+        {k:"created_at",l:"Time",r:v=><span style={{fontSize:12,fontFamily:M}}>{fTime(v)}</span>},
+        {k:"action",l:"Action",r:v=><span style={{fontSize:12,fontFamily:M,color:C.ac}}>{v}</span>},
+        {k:"username",l:"User",r:v=><span style={{fontWeight:500,color:C.txB}}>{v||"system"}</span>},
+        {k:"target_type",l:"Target Type"},
+        {k:"target_name",l:"Target"},
+        {k:"detail",l:"Detail",r:v=>{if(!v||typeof v==="object"&&Object.keys(v).length===0)return"\u2014";return<span style={{fontSize:11,fontFamily:M,color:C.txD}}>{typeof v==="object"?JSON.stringify(v):String(v)}</span>}},
+        {k:"success",l:"Result",r:v=>v?<Pill status="pass" label="OK"/>:<Pill status="fail" label="FAIL"/>},
+        {k:"ip_address",l:"IP",r:v=><span style={{fontSize:11,fontFamily:M,color:C.txM}}>{v||"\u2014"}</span>},
+      ]} data={entries}/>
+
+      {/* Pagination */}
+      {totalPages>1&&<div style={{display:"flex",justifyContent:"center",alignItems:"center",gap:12,padding:"16px 0",borderTop:"1px solid "+C.border,marginTop:8}}>
+        <Btn small variant="ghost" disabled={offset===0} onClick={()=>{setOffset(Math.max(0,offset-limit));setLoading(true);}}>Previous</Btn>
+        <span style={{fontSize:12,color:C.txM}}>Page {currentPage} of {totalPages}</span>
+        <Btn small variant="ghost" disabled={currentPage>=totalPages} onClick={()=>{setOffset(offset+limit);setLoading(true);}}>Next</Btn>
+      </div>}
+    </Card>}
+  </div>;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   USERS PAGE (admin only)
+   ═══════════════════════════════════════════════════════════════════════════ */
+function UsersPage(){
+  const[users,setUsers]=useState([]);
+  const[loading,setLoading]=useState(true);
+  const[error,setError]=useState("");
+  const[showAdd,setShowAdd]=useState(false);
+  const[editUser,setEditUser]=useState(null);
+
+  const load=useCallback(async()=>{
+    try{const data=await api.get("/users");setUsers(data||[]);setError("");}
+    catch{setError("Failed to load users");}
+    finally{setLoading(false);}
+  },[]);
+
+  useEffect(()=>{load();},[load]);
+
+  const toggleActive=async(user)=>{
+    try{
+      await api.patch("/users/"+user.id,{is_active:!user.is_active});
+      load();
+    }catch{alert("Update failed");}
+  };
+
+  const resetPassword=async(user)=>{
+    const newPw=prompt(`Enter new password for ${user.username}:`);
+    if(!newPw)return;
+    try{
+      await api.patch("/users/"+user.id,{password:newPw});
+      alert("Password reset successfully");
+    }catch{alert("Password reset failed");}
+  };
+
+  if(loading)return<PageLoader/>;
+
+  return<div>
+    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:22}}>
+      <div><h1 style={{fontSize:22,fontWeight:700,color:C.txB,margin:0}}>Users</h1><p style={{fontSize:13,color:C.txM,margin:"3px 0 0"}}>{users.length} users</p></div>
+      <div style={{display:"flex",gap:8}}><Btn variant="ghost" small onClick={load}><Sv d={iRf} s={14}/></Btn><Btn variant="accent" onClick={()=>setShowAdd(true)}><Sv d={iP} s={14}/> Add User</Btn></div>
+    </div>
+    {error&&<ErrorMsg msg={error} onRetry={load}/>}
+
+    <Card>
+      <Table cols={[
+        {k:"username",l:"Username",r:v=><span style={{fontWeight:600,color:C.txB}}>{v}</span>},
+        {k:"email",l:"Email"},
+        {k:"display_name",l:"Display Name"},
+        {k:"role",l:"Role",r:v=><Pill status={v} label={v}/>},
+        {k:"auth_method",l:"Auth",r:v=><Pill status={v} label={v==="azure_ad"?"Azure AD":"Local"}/>},
+        {k:"is_active",l:"Status",r:v=><Pill status={v?"active":"inactive"} label={v?"Active":"Inactive"}/>},
+        {k:"last_login",l:"Last Login",r:v=>v?<span style={{fontSize:12,fontFamily:M}}>{fTime(v)}</span>:"\u2014"},
+        {k:"id",l:"Actions",r:(v,r)=><div style={{display:"flex",gap:4}}>
+          <Btn small variant="ghost" onClick={()=>setEditUser(r)}><Sv d={iEdit} s={13}/></Btn>
+          <Btn small variant="ghost" onClick={()=>toggleActive(r)}>{r.is_active?"Deactivate":"Activate"}</Btn>
+          {r.auth_method==="local"&&<Btn small variant="ghost" onClick={()=>resetPassword(r)}>Reset PW</Btn>}
+        </div>},
+      ]} data={users}/>
+    </Card>
+
+    {showAdd&&<AddUserModal onClose={()=>setShowAdd(false)} onSave={()=>{setShowAdd(false);load();}}/>}
+    {editUser&&<EditUserModal user={editUser} onClose={()=>setEditUser(null)} onSave={()=>{setEditUser(null);load();}}/>}
+  </div>;
+}
+
+function AddUserModal({onClose,onSave}){
+  const[form,setForm]=useState({username:"",email:"",password:"",role:"viewer",display_name:""});
+  const[saving,setSaving]=useState(false);
+  const[error,setError]=useState("");
+  const upd=(k,v)=>setForm(p=>({...p,[k]:v}));
+
+  const save=async()=>{
+    if(!form.username||!form.password){setError("Username and password required");return;}
+    setSaving(true);setError("");
+    try{await api.post("/users",form);onSave();}
+    catch(err){let msg="Failed to create user";try{const b=await err.json();msg=b.detail||msg;}catch{}setError(msg);}
+    finally{setSaving(false);}
+  };
+
+  return<Modal onClose={onClose} title="Add User" subtitle="Create a new user account">
+    <Input label="Username" value={form.username} onChange={v=>upd("username",v)} required/>
+    <Input label="Email" value={form.email} onChange={v=>upd("email",v)} placeholder="user@example.com"/>
+    <Input label="Display Name" value={form.display_name} onChange={v=>upd("display_name",v)}/>
+    <Input label="Password" value={form.password} onChange={v=>upd("password",v)} type="password" required/>
+    <Select label="Role" value={form.role} onChange={v=>upd("role",v)} options={[{v:"viewer",l:"Viewer"},{v:"operator",l:"Operator"},{v:"admin",l:"Admin"}]}/>
+    {error&&<div style={{fontSize:12,color:C.r,marginBottom:12}}>{error}</div>}
+    <div style={{display:"flex",justifyContent:"flex-end",gap:10,paddingTop:12,borderTop:"1px solid "+C.border}}>
+      <Btn variant="ghost" onClick={onClose}>Cancel</Btn>
+      <Btn variant="primary" onClick={save} loading={saving}>Create User</Btn>
+    </div>
+  </Modal>;
+}
+
+function EditUserModal({user,onClose,onSave}){
+  const[form,setForm]=useState({email:user.email||"",display_name:user.display_name||"",role:user.role||"viewer"});
+  const[saving,setSaving]=useState(false);
+  const upd=(k,v)=>setForm(p=>({...p,[k]:v}));
+
+  const save=async()=>{
+    setSaving(true);
+    try{await api.patch("/users/"+user.id,form);onSave();}
+    catch{alert("Update failed");}
+    finally{setSaving(false);}
+  };
+
+  return<Modal onClose={onClose} title="Edit User" subtitle={user.username}>
+    <Input label="Email" value={form.email} onChange={v=>upd("email",v)}/>
+    <Input label="Display Name" value={form.display_name} onChange={v=>upd("display_name",v)}/>
+    <Select label="Role" value={form.role} onChange={v=>upd("role",v)} options={[{v:"viewer",l:"Viewer"},{v:"operator",l:"Operator"},{v:"admin",l:"Admin"}]}/>
+    <div style={{display:"flex",justifyContent:"flex-end",gap:10,paddingTop:12,borderTop:"1px solid "+C.border}}>
+      <Btn variant="ghost" onClick={onClose}>Cancel</Btn>
+      <Btn variant="primary" onClick={save} loading={saving}>Save</Btn>
+    </div>
+  </Modal>;
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   SBC STATUS PAGE
+   ═══════════════════════════════════════════════════════════════════════════ */
+function SBCPage(){
+  const[sbcs,setSbcs]=useState([]);
+  const[filter,setFilter]=useState("");
+  const[loading,setLoading]=useState(true);
+  const[error,setError]=useState("");
+
+  const load=useCallback(async()=>{
+    try{const d=await api.get("/sbcs"+(filter?`?status=${filter}`:""));setSbcs(d||[]);setError("");}
+    catch{setError("Failed to load SBCs");}
+    finally{setLoading(false);}
+  },[filter]);
+
+  useEffect(()=>{load();const iv=setInterval(load,15000);return()=>clearInterval(iv);},[load]);
+
+  if(loading&&sbcs.length===0)return<PageLoader/>;
+
+  const online=sbcs.filter(s=>s.status==="online").length;
+  const offline=sbcs.filter(s=>s.status==="offline").length;
+
+  return<div>
+    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:22}}>
+      <div><h1 style={{fontSize:22,fontWeight:700,color:C.txB,margin:0}}>SBC Status</h1><p style={{fontSize:13,color:C.txM,margin:"3px 0 0"}}>{online} online, {offline} offline — {sbcs.length} total</p></div>
+      <div style={{display:"flex",gap:8}}>
+        <Select value={filter} onChange={v=>{setFilter(v);setLoading(true);}} options={[{v:"",l:"All"},{v:"online",l:"Online"},{v:"offline",l:"Offline"}]}/>
+        <Btn variant="ghost" small onClick={load}><Sv d={iRf} s={14}/> Refresh</Btn>
+      </div>
+    </div>
+    {error&&<ErrorMsg msg={error} onRetry={load}/>}
+    <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:10,marginBottom:22}}>
+      <Card style={{padding:14,textAlign:"center"}}><Stat l="Online" v={online} c={C.g}/></Card>
+      <Card style={{padding:14,textAlign:"center"}}><Stat l="Offline" v={offline} c={offline>0?C.r:C.txM}/></Card>
+      <Card style={{padding:14,textAlign:"center"}}><Stat l="Total" v={sbcs.length} c={C.b}/></Card>
+    </div>
+    <Card>
+      <Table cols={[
+        {k:"sbc_name",l:"SBC Name",r:v=><span style={{fontWeight:600,color:C.txB}}>{v}</span>},
+        {k:"pbx_name",l:"PBX",r:v=><span style={{fontFamily:M,fontSize:12}}>{v}</span>},
+        {k:"status",l:"Status",r:v=><Pill status={v}/>},
+        {k:"tunnel_status",l:"Tunnel",r:v=><span style={{fontFamily:M,fontSize:11}}>{v||"\u2014"}</span>},
+        {k:"last_seen",l:"Last Seen",r:v=>v?ago(v):"\u2014"},
+      ]} data={sbcs}/>
+    </Card>
+  </div>;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   SETTINGS PAGE (admin)
+   ═══════════════════════════════════════════════════════════════════════════ */
+function SettingsPage(){
+  const user=JSON.parse(localStorage.getItem("user")||"{}");
+  const isAdmin=user.role==="admin";
+  const[tab,setTab]=useState("branding");
+  const[settings,setSettings]=useState({});
+  const[channels,setChannels]=useState([]);
+  const[history,setHistory]=useState([]);
+  const[ssoForm,setSsoForm]=useState({tenant_id:"",client_id:"",client_secret:"",redirect_uri:"",auto_create_users:true,default_role:"viewer"});
+  const[saving,setSaving]=useState(false);
+  const[loading,setLoading]=useState(true);
+  const[newCh,setNewCh]=useState(null);
+
+  const loadAll=useCallback(async()=>{
+    try{
+      const[all,chs]=await Promise.all([api.get("/settings"),api.get("/settings/notifications/channels")]);
+      setSettings(all||{});setChannels(chs||[]);
+      try{const sso=await api.get("/auth/sso/config");if(sso)setSsoForm({tenant_id:sso.tenant_id||"",client_id:sso.client_id||"",client_secret:"",redirect_uri:sso.redirect_uri||"",auto_create_users:sso.auto_create_users!==false,default_role:sso.default_role||"viewer"});}catch{}
+      try{const h=await api.get("/settings/notifications/history?limit=50");setHistory(h||[]);}catch{}
+    }catch{}
+    finally{setLoading(false);}
+  },[]);
+
+  useEffect(()=>{if(isAdmin)loadAll();},[isAdmin,loadAll]);
+
+  const sv=(key)=>{const cats=Object.values(settings);for(const cat of cats){if(cat[key])return cat[key].value;}return null;};
+  const updateSettings=async(updates)=>{
+    setSaving(true);
+    try{await api.put("/settings",updates);await loadAll();alert("Settings saved");}
+    catch{alert("Save failed");}
+    finally{setSaving(false);}
+  };
+
+  const tabs=[{id:"branding",l:"Branding"},{id:"notifications",l:"Notifications"},{id:"backup",l:"Backup Storage"},{id:"integrations",l:"Integrations"},{id:"sso",l:"SSO"},{id:"system",l:"System Info"}];
+
+  if(!isAdmin)return<div><h1 style={{fontSize:22,fontWeight:700,color:C.txB}}>Settings</h1><Card style={{marginTop:14}}><div style={{fontSize:13,color:C.txD}}>Username: {user.username} | Role: <Pill status={user.role} label={user.role}/></div></Card></div>;
+  if(loading)return<PageLoader/>;
+
+  return<div>
+    <h1 style={{fontSize:22,fontWeight:700,color:C.txB,margin:"0 0 16px"}}>Admin Settings</h1>
+    <div style={{display:"flex",gap:4,marginBottom:18,borderBottom:"1px solid "+C.border,paddingBottom:2}}>
+      {tabs.map(t=><button key={t.id} onClick={()=>setTab(t.id)} style={{padding:"8px 16px",border:"none",borderBottom:tab===t.id?"2px solid "+C.ac:"2px solid transparent",background:"transparent",color:tab===t.id?C.txB:C.txM,cursor:"pointer",fontFamily:F,fontSize:13,fontWeight:tab===t.id?600:400}}>{t.l}</button>)}
+    </div>
+
+    {/* BRANDING TAB */}
+    {tab==="branding"&&<BrandingTab settings={settings} sv={sv} updateSettings={updateSettings} saving={saving}/>}
+
+    {/* NOTIFICATIONS TAB */}
+    {tab==="notifications"&&<NotificationsTab settings={settings} sv={sv} updateSettings={updateSettings} saving={saving} channels={channels} history={history} onReload={loadAll} newCh={newCh} setNewCh={setNewCh}/>}
+
+    {/* BACKUP STORAGE TAB */}
+    {tab==="backup"&&<BackupStorageTab settings={settings} sv={sv} updateSettings={updateSettings} saving={saving}/>}
+
+    {/* INTEGRATIONS TAB */}
+    {tab==="integrations"&&<IntegrationsTab settings={settings} sv={sv} updateSettings={updateSettings} saving={saving}/>}
+
+    {/* SSO TAB */}
+    {tab==="sso"&&<Card>
+      <div style={{fontSize:14,fontWeight:600,color:C.txB,marginBottom:4}}>Azure AD SSO</div>
+      <div style={{fontSize:12,color:C.txM,marginBottom:16}}>Configure Microsoft Azure Active Directory single sign-on</div>
+      <Input label="Tenant ID" value={ssoForm.tenant_id} onChange={v=>setSsoForm(p=>({...p,tenant_id:v}))} mono placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"/>
+      <Input label="Client ID" value={ssoForm.client_id} onChange={v=>setSsoForm(p=>({...p,client_id:v}))} mono placeholder="Application (client) ID"/>
+      <Input label="Client Secret" value={ssoForm.client_secret} onChange={v=>setSsoForm(p=>({...p,client_secret:v}))} type="password" placeholder="Leave blank to keep current"/>
+      <Input label="Redirect URI" value={ssoForm.redirect_uri} onChange={v=>setSsoForm(p=>({...p,redirect_uri:v}))} mono placeholder="https://your-domain.com/api/auth/sso/callback"/>
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:14}}>
+        <div style={{marginBottom:16}}><label style={{display:"flex",alignItems:"center",gap:8,cursor:"pointer"}}><input type="checkbox" checked={ssoForm.auto_create_users} onChange={e=>setSsoForm(p=>({...p,auto_create_users:e.target.checked}))} style={{accentColor:C.ac}}/><span style={{fontSize:13,color:C.txB}}>Auto-create users on first SSO login</span></label></div>
+        <Select label="Default SSO Role" value={ssoForm.default_role} onChange={v=>setSsoForm(p=>({...p,default_role:v}))} options={[{v:"viewer",l:"Viewer"},{v:"operator",l:"Operator"},{v:"admin",l:"Admin"}]}/>
+      </div>
+      <div style={{display:"flex",justifyContent:"flex-end",paddingTop:8,borderTop:"1px solid "+C.border}}>
+        <Btn variant="primary" onClick={async()=>{setSaving(true);try{await api.put("/auth/sso/config",ssoForm);alert("SSO saved");}catch{alert("Save failed");}finally{setSaving(false);}}} loading={saving}>Save SSO Config</Btn>
+      </div>
+    </Card>}
+
+    {/* SYSTEM INFO TAB */}
+    {tab==="system"&&<div style={{display:"grid",gap:12}}>
+      <Card><div style={{fontSize:14,fontWeight:600,color:C.txB,marginBottom:12}}>Current User</div><div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:14,fontSize:13,color:C.txD}}><div><span style={{color:C.txM}}>Username:</span> {user.username||"\u2014"}</div><div><span style={{color:C.txM}}>Role:</span> <Pill status={user.role||"viewer"} label={user.role||"viewer"}/></div></div></Card>
+      <Card><div style={{fontSize:14,fontWeight:600,color:C.txB,marginBottom:12}}>Security</div><div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:14,fontSize:13,color:C.txD}}><div><span style={{color:C.txM}}>Encryption:</span> AES-256-GCM</div><div><span style={{color:C.txM}}>Key source:</span> MASTER_KEY env var</div><div><span style={{color:C.txM}}>JWT expiry:</span> 60 min</div><div><span style={{color:C.txM}}>Login lockout:</span> 5 attempts / 15 min</div></div></Card>
+      <Card><div style={{fontSize:14,fontWeight:600,color:C.txB,marginBottom:12}}>Infrastructure</div><div style={{fontSize:12,fontFamily:M,color:C.txM}}>PostgreSQL 16 | Redis 7 | Celery 5.4 | Poll: 15s beat, 30s alerts | Audit: immutable | Poll history: 90-day retention</div></Card>
+    </div>}
+  </div>;
+}
+
+function BrandingTab({sv,updateSettings,saving}){
+  const[name,setName]=useState(sv("branding.company_name")||"PBXMonitorX");
+  const[logo,setLogo]=useState(sv("branding.logo_url")||"");
+  const[color,setColor]=useState(sv("branding.primary_color")||"#C8965A");
+  const[favicon,setFavicon]=useState(sv("branding.favicon_url")||"");
+  return<div style={{display:"grid",gap:12}}>
+    <Card>
+      <div style={{fontSize:14,fontWeight:600,color:C.txB,marginBottom:4}}>Branding</div>
+      <div style={{fontSize:12,color:C.txM,marginBottom:16}}>Customize the appearance of PBXMonitorX</div>
+      <Input label="Company Name" value={name} onChange={setName} placeholder="Your Company Name"/>
+      <Input label="Logo URL" value={logo} onChange={setLogo} mono placeholder="https://example.com/logo.png or data:image/..."/>
+      <div style={{marginBottom:16}}><label style={{fontSize:12,fontWeight:500,color:C.txD,display:"block",marginBottom:4}}>Primary Accent Color</label><div style={{display:"flex",gap:8,alignItems:"center"}}><input type="color" value={color} onChange={e=>setColor(e.target.value)} style={{width:40,height:32,border:"1px solid "+C.border,borderRadius:4,cursor:"pointer"}}/><input value={color} onChange={e=>setColor(e.target.value)} style={{background:C.bg1,border:"1px solid "+C.border,borderRadius:6,padding:"6px 10px",color:C.txB,fontFamily:M,fontSize:12,width:100}}/><div style={{width:24,height:24,borderRadius:4,background:color}}/></div></div>
+      <Input label="Favicon URL" value={favicon} onChange={setFavicon} mono placeholder="https://example.com/favicon.ico"/>
+      {logo&&<div style={{marginBottom:12}}><label style={{fontSize:12,color:C.txM}}>Preview:</label><div style={{marginTop:4,background:C.bg1,padding:12,borderRadius:6,display:"inline-block"}}><img src={logo} alt="logo preview" style={{maxHeight:40,maxWidth:200}} onError={e=>{e.target.style.display="none";}}/></div></div>}
+      <div style={{display:"flex",justifyContent:"flex-end",paddingTop:8,borderTop:"1px solid "+C.border}}>
+        <Btn variant="primary" onClick={()=>updateSettings({"branding.company_name":name,"branding.logo_url":logo,"branding.primary_color":color,"branding.favicon_url":favicon})} loading={saving}>Save Branding</Btn>
+      </div>
+    </Card>
+  </div>;
+}
+
+function NotificationsTab({sv,updateSettings,saving,channels,history,onReload,newCh,setNewCh}){
+  const enabled=sv("notifications.enabled");
+  const[testing,setTesting]=useState(null);
+  const toggles=[
+    {k:"notifications.alert_on_trunk_down",l:"Trunk Down"},
+    {k:"notifications.alert_on_sbc_offline",l:"SBC Offline"},
+    {k:"notifications.alert_on_backup_fail",l:"Backup Failed"},
+    {k:"notifications.alert_on_backup_success",l:"Backup Success"},
+    {k:"notifications.alert_on_license_expiring",l:"License Expiring"},
+    {k:"notifications.alert_on_pbx_unreachable",l:"PBX Unreachable"},
+  ];
+
+  const testCh=async(id)=>{setTesting(id);try{const r=await api.post(`/settings/notifications/channels/${id}/test`);alert(r.success?"Test sent!":"Test failed: "+(r.error||"unknown"));}catch{alert("Test failed");}finally{setTesting(null);}};
+  const deleteCh=async(id)=>{if(!confirm("Delete this channel?"))return;try{await api.del(`/settings/notifications/channels/${id}`);onReload();}catch{alert("Delete failed");}};
+  const createCh=async()=>{if(!newCh?.name)return;try{await api.post("/settings/notifications/channels",newCh);setNewCh(null);onReload();}catch{alert("Create failed");}};
+
+  return<div style={{display:"grid",gap:12}}>
+    <Card>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
+        <div><div style={{fontSize:14,fontWeight:600,color:C.txB}}>Notifications</div><div style={{fontSize:12,color:C.txM}}>Global notification settings</div></div>
+        <label style={{display:"flex",alignItems:"center",gap:8,cursor:"pointer"}}><span style={{fontSize:13,color:enabled?C.g:C.txM}}>{enabled?"Enabled":"Disabled"}</span><input type="checkbox" checked={!!enabled} onChange={e=>updateSettings({"notifications.enabled":e.target.checked})} style={{accentColor:C.ac}}/></label>
+      </div>
+      <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:8}}>
+        {toggles.map(t=><label key={t.k} style={{display:"flex",alignItems:"center",gap:6,cursor:"pointer",padding:"6px 8px",background:C.bg1,borderRadius:6,border:"1px solid "+C.border}}><input type="checkbox" checked={!!sv(t.k)} onChange={e=>updateSettings({[t.k]:e.target.checked})} style={{accentColor:C.ac}}/><span style={{fontSize:12,color:C.txB}}>{t.l}</span></label>)}
+      </div>
+    </Card>
+
+    <Card>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
+        <div style={{fontSize:14,fontWeight:600,color:C.txB}}>Notification Channels</div>
+        <Btn small variant="accent" onClick={()=>setNewCh({name:"",channel_type:"email",config:{smtp_host:"",smtp_port:587,smtp_user:"",smtp_pass:"",from_addr:"",to_addrs:[],use_tls:true},is_enabled:true})}><Sv d={iP} s={13}/> Add Channel</Btn>
+      </div>
+      {channels.map(ch=><div key={ch.id} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"10px 12px",background:C.bg1,borderRadius:6,marginBottom:6,border:"1px solid "+C.border}}>
+        <div><span style={{fontWeight:500,color:C.txB}}>{ch.name}</span><span style={{fontSize:11,color:C.txM,marginLeft:8}}>{ch.channel_type}</span></div>
+        <div style={{display:"flex",gap:4}}>
+          <Pill status={ch.is_enabled?"active":"inactive"} label={ch.is_enabled?"active":"disabled"}/>
+          <Btn small variant="ghost" onClick={()=>testCh(ch.id)} loading={testing===ch.id}>Test</Btn>
+          <Btn small variant="ghost" onClick={()=>deleteCh(ch.id)}><Sv d={iTrash} s={13} c={C.r}/></Btn>
+        </div>
+      </div>)}
+      {channels.length===0&&<div style={{fontSize:12,color:C.txM,textAlign:"center",padding:20}}>No notification channels configured</div>}
+    </Card>
+
+    {newCh&&<Card>
+      <div style={{fontSize:14,fontWeight:600,color:C.txB,marginBottom:12}}>New Channel</div>
+      <Input label="Name" value={newCh.name} onChange={v=>setNewCh(p=>({...p,name:v}))} placeholder="e.g. IT Team Email"/>
+      <Select label="Type" value={newCh.channel_type} onChange={v=>setNewCh(p=>({...p,channel_type:v}))} options={[{v:"email",l:"Email (SMTP)"},{v:"webhook",l:"Webhook"},{v:"halopsa",l:"HaloPSA"}]}/>
+      {newCh.channel_type==="email"&&<>
+        <div style={{display:"grid",gridTemplateColumns:"2fr 1fr",gap:8}}><Input label="SMTP Host" value={newCh.config.smtp_host||""} onChange={v=>setNewCh(p=>({...p,config:{...p.config,smtp_host:v}}))}/><Input label="Port" value={String(newCh.config.smtp_port||587)} onChange={v=>setNewCh(p=>({...p,config:{...p.config,smtp_port:parseInt(v)||587}}))}/></div>
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}><Input label="SMTP User" value={newCh.config.smtp_user||""} onChange={v=>setNewCh(p=>({...p,config:{...p.config,smtp_user:v}}))}/><Input label="SMTP Password" type="password" value={newCh.config.smtp_pass||""} onChange={v=>setNewCh(p=>({...p,config:{...p.config,smtp_pass:v}}))}/></div>
+        <Input label="From Address" value={newCh.config.from_addr||""} onChange={v=>setNewCh(p=>({...p,config:{...p.config,from_addr:v}}))} placeholder="alerts@example.com"/>
+        <Input label="To Addresses (comma-separated)" value={(newCh.config.to_addrs||[]).join(",")} onChange={v=>setNewCh(p=>({...p,config:{...p.config,to_addrs:v.split(",").map(s=>s.trim()).filter(Boolean)}}))} placeholder="admin@example.com, ops@example.com"/>
+      </>}
+      {(newCh.channel_type==="webhook"||newCh.channel_type==="halopsa")&&<>
+        <Input label="Webhook URL" value={newCh.config.url||""} onChange={v=>setNewCh(p=>({...p,config:{...p.config,url:v}}))} mono placeholder="https://api.example.com/webhook"/>
+      </>}
+      <div style={{display:"flex",gap:8,justifyContent:"flex-end",paddingTop:8,borderTop:"1px solid "+C.border}}>
+        <Btn variant="ghost" onClick={()=>setNewCh(null)}>Cancel</Btn>
+        <Btn variant="primary" onClick={createCh}>Create Channel</Btn>
+      </div>
+    </Card>}
+
+    {history.length>0&&<Card>
+      <div style={{fontSize:14,fontWeight:600,color:C.txB,marginBottom:12}}>Recent Notifications</div>
+      <Table cols={[
+        {k:"notification_type",l:"Type",r:v=><Pill status={v.includes("fail")?"error":"info"} label={v.replace(/_/g," ")}/>},
+        {k:"subject",l:"Subject",r:v=><span style={{fontSize:11}}>{(v||"").substring(0,60)}</span>},
+        {k:"recipient",l:"To",r:v=><span style={{fontFamily:M,fontSize:11}}>{(v||"").substring(0,30)}</span>},
+        {k:"success",l:"Status",r:v=><Pill status={v?"pass":"fail"} label={v?"sent":"failed"}/>},
+        {k:"sent_at",l:"Sent",r:v=>fTime(v)},
+      ]} data={history}/>
+    </Card>}
+  </div>;
+}
+
+function BackupStorageTab({sv,updateSettings,saving}){
+  const[storageType,setStorageType]=useState(sv("backup.storage_type")||"local");
+  const[localPath,setLocalPath]=useState(sv("backup.default_storage_path")||"/data/backups");
+  const[s3Bucket,setS3Bucket]=useState(sv("backup.s3_bucket")||"");
+  const[s3Region,setS3Region]=useState(sv("backup.s3_region")||"");
+  const[s3Key,setS3Key]=useState(sv("backup.s3_access_key")||"");
+  const[sftpHost,setSftpHost]=useState(sv("backup.sftp_host")||"");
+  const[sftpPort,setSftpPort]=useState(sv("backup.sftp_port")||"22");
+  const[sftpUser,setSftpUser]=useState(sv("backup.sftp_user")||"");
+  const[sftpPath,setSftpPath]=useState(sv("backup.sftp_path")||"");
+  const[retainCount,setRetainCount]=useState(sv("backup.default_retain_count")||"10");
+  const[retainDays,setRetainDays]=useState(sv("backup.default_retain_days")||"30");
+
+  const save=()=>{
+    const u={"backup.storage_type":storageType,"backup.default_storage_path":localPath,"backup.s3_bucket":s3Bucket,"backup.s3_region":s3Region,"backup.s3_access_key":s3Key,"backup.sftp_host":sftpHost,"backup.sftp_port":sftpPort,"backup.sftp_user":sftpUser,"backup.sftp_path":sftpPath,"backup.default_retain_count":parseInt(retainCount)||10,"backup.default_retain_days":parseInt(retainDays)||30};
+    updateSettings(u);
+  };
+
+  return<div style={{display:"grid",gap:12}}>
+    <Card>
+      <div style={{fontSize:14,fontWeight:600,color:C.txB,marginBottom:4}}>Backup Storage</div>
+      <div style={{fontSize:12,color:C.txM,marginBottom:16}}>Configure where PBX backups are stored</div>
+      <Select label="Storage Type" value={storageType} onChange={setStorageType} options={[{v:"local",l:"Local Filesystem"},{v:"s3",l:"Amazon S3 / Compatible"},{v:"sftp",l:"SFTP Remote Server"}]}/>
+      {storageType==="local"&&<Input label="Storage Path" value={localPath} onChange={setLocalPath} mono placeholder="/data/backups"/>}
+      {storageType==="s3"&&<><Input label="S3 Bucket" value={s3Bucket} onChange={setS3Bucket} mono/><Input label="S3 Region" value={s3Region} onChange={setS3Region} mono placeholder="us-east-1"/><Input label="Access Key" value={s3Key} onChange={setS3Key} mono/><div style={{fontSize:11,color:C.txM,margin:"-8px 0 12px"}}>Secret key stored encrypted on server</div></>}
+      {storageType==="sftp"&&<><div style={{display:"grid",gridTemplateColumns:"3fr 1fr",gap:8}}><Input label="SFTP Host" value={sftpHost} onChange={setSftpHost} mono/><Input label="Port" value={sftpPort} onChange={setSftpPort}/></div><Input label="Username" value={sftpUser} onChange={setSftpUser} mono/><Input label="Remote Path" value={sftpPath} onChange={setSftpPath} mono placeholder="/backups/pbx"/></>}
+    </Card>
+    <Card>
+      <div style={{fontSize:14,fontWeight:600,color:C.txB,marginBottom:12}}>Default Retention Policy</div>
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}><Input label="Keep Last N Backups" value={retainCount} onChange={setRetainCount}/><Input label="Keep Backups for N Days" value={retainDays} onChange={setRetainDays}/></div>
+      <div style={{display:"flex",justifyContent:"flex-end",paddingTop:8,borderTop:"1px solid "+C.border}}>
+        <Btn variant="primary" onClick={save} loading={saving}>Save Backup Settings</Btn>
+      </div>
+    </Card>
+  </div>;
+}
+
+function IntegrationsTab({sv,updateSettings,saving}){
+  const[haloEnabled,setHaloEnabled]=useState(!!sv("integrations.halopsa_enabled"));
+  const[haloUrl,setHaloUrl]=useState(sv("integrations.halopsa_api_url")||"");
+  const[haloClientId,setHaloClientId]=useState(sv("integrations.halopsa_client_id")||"");
+  const[haloTicketType,setHaloTicketType]=useState(sv("integrations.halopsa_ticket_type_id")||"0");
+  const[haloAgent,setHaloAgent]=useState(sv("integrations.halopsa_agent_id")||"0");
+
+  return<Card>
+    <div style={{fontSize:14,fontWeight:600,color:C.txB,marginBottom:4}}>HaloPSA Integration</div>
+    <div style={{fontSize:12,color:C.txM,marginBottom:16}}>Create tickets in HaloPSA when alerts fire. Configure a webhook notification channel with HaloPSA type for delivery.</div>
+    <div style={{marginBottom:16}}><label style={{display:"flex",alignItems:"center",gap:8,cursor:"pointer"}}><input type="checkbox" checked={haloEnabled} onChange={e=>setHaloEnabled(e.target.checked)} style={{accentColor:C.ac}}/><span style={{fontSize:13,color:C.txB}}>Enable HaloPSA Integration</span></label></div>
+    {haloEnabled&&<>
+      <Input label="HaloPSA API URL" value={haloUrl} onChange={setHaloUrl} mono placeholder="https://yourcompany.halopsa.com/api"/>
+      <Input label="OAuth Client ID" value={haloClientId} onChange={setHaloClientId} mono/>
+      <div style={{fontSize:11,color:C.txM,margin:"-8px 0 12px"}}>Client secret stored encrypted on server</div>
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
+        <Input label="Default Ticket Type ID" value={haloTicketType} onChange={setHaloTicketType}/>
+        <Input label="Default Agent/Team ID" value={haloAgent} onChange={setHaloAgent}/>
+      </div>
+    </>}
+    <div style={{display:"flex",justifyContent:"flex-end",paddingTop:8,borderTop:"1px solid "+C.border}}>
+      <Btn variant="primary" onClick={()=>updateSettings({"integrations.halopsa_enabled":haloEnabled,"integrations.halopsa_api_url":haloUrl,"integrations.halopsa_client_id":haloClientId,"integrations.halopsa_ticket_type_id":parseInt(haloTicketType)||0,"integrations.halopsa_agent_id":parseInt(haloAgent)||0})} loading={saving}>Save Integration</Btn>
+    </div>
+  </Card>;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   EVENT LOG PAGE
+   ═══════════════════════════════════════════════════════════════════════════ */
+function EventLogPage(){
+  const[events,setEvents]=useState(null);
+  const[stats,setStats]=useState(null);
+  const[level,setLevel]=useState("");
+  const[source,setSource]=useState("");
+  const[search,setSearch]=useState("");
+  const[page,setPage]=useState(1);
+  const[expanded,setExpanded]=useState(null);
+  const perPage=50;
+
+  const load=useCallback(()=>{
+    const params=new URLSearchParams({page,per_page:perPage});
+    if(level)params.set("level",level);
+    if(source)params.set("source",source);
+    if(search)params.set("search",search);
+    api.get("/events?"+params).then(setEvents).catch(()=>{});
+  },[level,source,search,page]);
+
+  useEffect(()=>{load()},[load]);
+  useEffect(()=>{api.get("/events/stats").then(setStats).catch(()=>{})},[]);
+
+  const levelColors={debug:C.txM,info:C.b,warning:C.y,error:C.r,critical:C.r};
+  const levelBgs={debug:"rgba(94,90,85,.06)",info:C.bB,warning:C.yB,error:C.rB,critical:C.rB};
+
+  return<div style={{animation:"fadeIn .2s"}}>
+    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:20}}>
+      <div><h1 style={{fontSize:22,fontWeight:700,color:C.txB,margin:0}}>Event Log</h1>
+        <p style={{fontSize:13,color:C.txM,margin:"3px 0 0"}}>Operational events and errors for troubleshooting</p></div>
+      <div style={{display:"flex",gap:8}}>
+        <Btn small onClick={load}><Sv d={iRf} s={13}/> Refresh</Btn>
+      </div>
+    </div>
+
+    {/* Stats cards */}
+    {stats&&<div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(140px,1fr))",gap:12,marginBottom:20}}>
+      {["debug","info","warning","error","critical"].map(l=><div key={l} style={{background:C.bg1,border:"1px solid "+C.border,borderRadius:8,padding:"12px 16px",textAlign:"center"}}>
+        <div style={{fontSize:18,fontWeight:700,color:levelColors[l]||C.txB,fontFamily:M}}>{stats.by_level[l]||0}</div>
+        <div style={{fontSize:10,color:C.txM,textTransform:"uppercase",letterSpacing:".06em",marginTop:2,fontWeight:600}}>{l}</div>
+      </div>)}
+    </div>}
+
+    {/* Filters */}
+    <div style={{display:"flex",gap:8,marginBottom:16,flexWrap:"wrap"}}>
+      <select value={level} onChange={e=>{setLevel(e.target.value);setPage(1)}} style={{background:C.bg2,border:"1px solid "+C.border,color:C.tx,padding:"6px 10px",borderRadius:6,fontSize:12,fontFamily:F}}>
+        <option value="">All Levels</option>
+        {["debug","info","warning","error","critical"].map(l=><option key={l} value={l}>{l.charAt(0).toUpperCase()+l.slice(1)}</option>)}
+      </select>
+      <select value={source} onChange={e=>{setSource(e.target.value);setPage(1)}} style={{background:C.bg2,border:"1px solid "+C.border,color:C.tx,padding:"6px 10px",borderRadius:6,fontSize:12,fontFamily:F}}>
+        <option value="">All Sources</option>
+        {["polling","backup","alert","adapter","notification","auth","system","scheduler","settings"].map(s=><option key={s} value={s}>{s.charAt(0).toUpperCase()+s.slice(1)}</option>)}
+      </select>
+      <input value={search} onChange={e=>{setSearch(e.target.value);setPage(1)}} placeholder="Search messages..." style={{background:C.bg2,border:"1px solid "+C.border,color:C.tx,padding:"6px 10px",borderRadius:6,fontSize:12,fontFamily:F,flex:1,minWidth:180}}/>
+    </div>
+
+    {/* Recent errors */}
+    {stats?.recent_errors?.length>0&&<div style={{background:C.rB,border:"1px solid rgba(231,76,60,.2)",borderRadius:8,padding:"12px 16px",marginBottom:16}}>
+      <div style={{fontSize:12,fontWeight:600,color:C.r,marginBottom:6}}>Recent Errors</div>
+      {stats.recent_errors.slice(0,5).map(e=><div key={e.id} style={{fontSize:11,color:C.tx,padding:"2px 0",fontFamily:M}}>
+        <span style={{color:C.txM}}>{fTime(e.timestamp)}</span> <span style={{color:C.r}}>[{e.source}]</span> {e.message}
+      </div>)}
+    </div>}
+
+    {/* Event table */}
+    {!events?<PageLoader/>:<>
+      <div style={{background:C.bg1,border:"1px solid "+C.border,borderRadius:8,overflow:"hidden"}}>
+        <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}>
+          <thead><tr style={{borderBottom:"1px solid "+C.border}}>
+            {["Time","Level","Source","PBX","Event","Message","ms"].map(h=><th key={h} style={{padding:"8px 10px",textAlign:"left",fontSize:10,fontWeight:600,color:C.txM,textTransform:"uppercase",letterSpacing:".05em"}}>{h}</th>)}
+          </tr></thead>
+          <tbody>{events.events.map(e=><Fragment key={e.id}>
+            <tr onClick={()=>setExpanded(expanded===e.id?null:e.id)} style={{borderBottom:"1px solid "+C.border,cursor:"pointer",background:expanded===e.id?C.bg2:"transparent",transition:"background .12s"}}>
+              <td style={{padding:"6px 10px",fontFamily:M,fontSize:11,color:C.txM,whiteSpace:"nowrap"}}>{fTime(e.timestamp)}</td>
+              <td style={{padding:"6px 10px"}}><span style={{display:"inline-block",padding:"1px 7px",borderRadius:99,fontSize:10,fontWeight:600,color:levelColors[e.level]||C.txM,background:levelBgs[e.level]||"transparent"}}>{e.level}</span></td>
+              <td style={{padding:"6px 10px",fontFamily:M,fontSize:11,color:C.ac}}>{e.source}</td>
+              <td style={{padding:"6px 10px",fontSize:11,color:C.txD}}>{e.pbx_name||"\u2014"}</td>
+              <td style={{padding:"6px 10px",fontFamily:M,fontSize:11,color:C.tx}}>{e.event_type}</td>
+              <td style={{padding:"6px 10px",fontSize:11,color:C.tx,maxWidth:400,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{e.message}</td>
+              <td style={{padding:"6px 10px",fontFamily:M,fontSize:11,color:C.txD,textAlign:"right"}}>{e.duration_ms!=null?e.duration_ms:"\u2014"}</td>
+            </tr>
+            {expanded===e.id&&<tr><td colSpan={7} style={{padding:"10px 14px",background:C.bg2,borderBottom:"1px solid "+C.border}}>
+              <div style={{fontSize:11,fontFamily:M,color:C.tx}}>
+                <div style={{marginBottom:6}}><strong style={{color:C.txB}}>Full Message:</strong> {e.message}</div>
+                {e.detail&&Object.keys(e.detail).length>0&&<div style={{marginBottom:6}}><strong style={{color:C.txB}}>Detail:</strong><pre style={{margin:"4px 0",padding:8,background:C.bg0,borderRadius:4,fontSize:10,color:C.txD,overflow:"auto",maxHeight:200}}>{JSON.stringify(e.detail,null,2)}</pre></div>}
+                {e.error_trace&&<div><strong style={{color:C.r}}>Stack Trace:</strong><pre style={{margin:"4px 0",padding:8,background:C.bg0,borderRadius:4,fontSize:10,color:C.r,overflow:"auto",maxHeight:300,whiteSpace:"pre-wrap"}}>{e.error_trace}</pre></div>}
+              </div>
+            </td></tr>}
+          </Fragment>)}</tbody>
+        </table>
+      </div>
+      {events.pages>1&&<div style={{display:"flex",justifyContent:"center",gap:6,marginTop:14}}>
+        <Btn small variant="ghost" onClick={()=>setPage(Math.max(1,page-1))} disabled={page<=1}>Prev</Btn>
+        <span style={{fontSize:12,color:C.txM,padding:"6px 8px",fontFamily:M}}>{page} / {events.pages}</span>
+        <Btn small variant="ghost" onClick={()=>setPage(Math.min(events.pages,page+1))} disabled={page>=events.pages}>Next</Btn>
+      </div>}
+    </>}
+  </div>;
+}
 
 /* ═══════════════════════════════════════════════════════════════════════════
    APP SHELL
    ═══════════════════════════════════════════════════════════════════════════ */
 export default function App(){
+  const[authed,setAuthed]=useState(!!localStorage.getItem("token"));
+  const[user,setUser]=useState(()=>{try{return JSON.parse(localStorage.getItem("user")||"null")}catch{return null}});
   const[page,setPage]=useState("dashboard");
-  const[detail,setDetail]=useState(null);
+  const[detailId,setDetailId]=useState(null);
   const[showAdd,setShowAdd]=useState(false);
-  const[instances,setInstances]=useState(INIT);
+  const[refreshKey,setRefreshKey]=useState(0);
+  const[alertCount,setAlertCount]=useState(0);
+
+  // Listen for auth-logout events from 401 handler
+  useEffect(()=>{
+    const handler=()=>{setAuthed(false);setUser(null);};
+    window.addEventListener("auth-logout",handler);
+    return()=>window.removeEventListener("auth-logout",handler);
+  },[]);
+
+  // Periodically check firing alert count for badge
+  useEffect(()=>{
+    if(!authed)return;
+    const loadAlertCount=()=>{
+      api.get("/alerts?state=firing").then(data=>{
+        setAlertCount(Array.isArray(data)?data.length:0);
+      }).catch(()=>{});
+    };
+    loadAlertCount();
+    const iv=setInterval(loadAlertCount,30000);
+    return()=>clearInterval(iv);
+  },[authed]);
+
+  const handleLogin=(u)=>{setAuthed(true);setUser(u);};
+  const handleLogout=()=>{
+    localStorage.removeItem("token");
+    localStorage.removeItem("user");
+    setAuthed(false);setUser(null);setPage("dashboard");setDetailId(null);
+  };
+
+  const navigate=(pg,id)=>{
+    if(pg==="detail"&&id){setPage("systems");setDetailId(id);}
+    else{setPage(pg);setDetailId(null);}
+  };
+
+  if(!authed)return<LoginPage onLogin={handleLogin}/>;
+
+  const isAdmin=user?.role==="admin";
 
   const nav=[
     {id:"dashboard",l:"Dashboard",d:"M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-4 0v-4a1 1 0 011-1h2a1 1 0 011 1v4"},
-    {id:"instances",l:"Instances",d:"M4 6h16M4 6a2 2 0 012-2h12a2 2 0 012 2M4 6v4a2 2 0 002 2h12a2 2 0 002-2V6M6 8h.01M6 16h.01M4 14h16v4a2 2 0 01-2 2H6a2 2 0 01-2-2v-4"},
+    {id:"systems",l:"Systems",d:"M4 6h16M4 6a2 2 0 012-2h12a2 2 0 012 2M4 6v4a2 2 0 002 2h12a2 2 0 002-2V6M6 8h.01M6 16h.01M4 14h16v4a2 2 0 01-2 2H6a2 2 0 01-2-2v-4"},
+    {id:"sbcs",l:"SBC Status",d:iSh},
+    {id:"phones",l:"Phone Numbers",d:iPhone},
     {id:"backups",l:"Backups",d:iDl},
     {id:"alerts",l:"Alerts",d:"M15 17h5l-1.405-1.405A2.032 2.032 0 0118 14.158V11a6 6 0 00-5-5.917V4a1 1 0 10-2 0v1.083A6 6 0 006 11v3.159c0 .538-.214 1.055-.595 1.436L4 17h5m6 0a3 3 0 11-6 0"},
     {id:"audit",l:"Audit Log",d:"M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2"},
-    {id:"settings",l:"Settings",d:"M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.066 2.573c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.573 1.066c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.066-2.573c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065zM15 12a3 3 0 11-6 0 3 3 0 016 0z"},
+    ...(isAdmin?[{id:"eventlog",l:"Event Log",d:iW}]:[]),
+    ...(isAdmin?[{id:"users",l:"Users",d:iUser}]:[]),
+    ...(isAdmin?[{id:"settings",l:"Settings",d:"M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.066 2.573c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.573 1.066c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.066-2.573c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065zM15 12a3 3 0 11-6 0 3 3 0 016 0z"}]:[]),
   ];
-  const activeAlerts=ALERTS.filter(a=>a.state==="active").length;
-
-  const handleAddSave=(inst)=>{setInstances(p=>[...p,inst])};
 
   const renderPage=()=>{
-    if(detail)return<Detail inst={detail} onBack={()=>setDetail(null)}/>;
+    if(detailId)return<DetailPage instanceId={detailId} onBack={()=>setDetailId(null)}/>;
     switch(page){
-      case"dashboard":case"instances":return<Dashboard instances={instances} onSelect={i=>{setDetail(i);setPage("instances")}} onAdd={()=>setShowAdd(true)}/>;
-      case"backups":return<BackupsPage instances={instances}/>;
+      case"dashboard":return<DashboardPage onNavigate={navigate}/>;
+      case"systems":return<SystemsPage key={refreshKey} onSelect={id=>setDetailId(id)} onAdd={()=>setShowAdd(true)}/>;
+      case"sbcs":return<SBCPage/>;
+      case"phones":return<PhoneNumbersPage/>;
+      case"backups":return<BackupsPage/>;
       case"alerts":return<AlertsPage/>;
       case"audit":return<AuditPage/>;
-      case"settings":return<SettingsPage/>;
-      default:return<Dashboard instances={instances} onSelect={setDetail} onAdd={()=>setShowAdd(true)}/>;
+      case"eventlog":return isAdmin?<EventLogPage/>:<DashboardPage onNavigate={navigate}/>;
+      case"users":return isAdmin?<UsersPage/>:<DashboardPage onNavigate={navigate}/>;
+      case"settings":return isAdmin?<SettingsPage/>:<DashboardPage onNavigate={navigate}/>;
+      default:return<DashboardPage onNavigate={navigate}/>;
     }
   };
 
@@ -341,17 +1603,20 @@ export default function App(){
     <nav style={{width:210,background:C.bg1,borderRight:"1px solid "+C.border,display:"flex",flexDirection:"column",padding:"14px 0",flexShrink:0}}>
       <div style={{padding:"2px 18px 18px",borderBottom:"1px solid "+C.border,marginBottom:6}}>
         <div style={{fontSize:16,fontWeight:800,color:C.txB,letterSpacing:"-.02em"}}>PBXMonitor<span style={{color:C.ac}}>X</span></div>
-        <div style={{fontSize:10,color:C.txM,marginTop:2,fontFamily:M}}>3CX v20 · Linux</div>
+        <div style={{fontSize:10,color:C.txM,marginTop:2,fontFamily:M}}>3CX v20 | {user?.username||"user"}</div>
       </div>
-      {nav.map(n=>{const active=(page===n.id&&!detail)||(n.id==="instances"&&detail);return<button key={n.id} onClick={()=>{setPage(n.id);setDetail(null)}} style={{display:"flex",alignItems:"center",gap:10,padding:"9px 18px",margin:"1px 8px",borderRadius:6,border:"none",cursor:"pointer",fontFamily:F,fontSize:13,fontWeight:active?600:400,color:active?C.txB:C.txD,background:active?C.acBg:"transparent",transition:"all .12s",textAlign:"left",position:"relative"}}>
+      {nav.map(n=>{const active=(page===n.id&&!detailId)||(n.id==="systems"&&detailId);return<button key={n.id} onClick={()=>{setPage(n.id);setDetailId(null)}} style={{display:"flex",alignItems:"center",gap:10,padding:"9px 18px",margin:"1px 8px",borderRadius:6,border:"none",cursor:"pointer",fontFamily:F,fontSize:13,fontWeight:active?600:400,color:active?C.txB:C.txD,background:active?C.acBg:"transparent",transition:"all .12s",textAlign:"left",position:"relative"}}>
         <Sv d={n.d} s={16} c={active?C.ac:C.txD}/>{n.l}
-        {n.id==="alerts"&&activeAlerts>0&&<span style={{position:"absolute",right:12,background:C.r,color:"#fff",fontSize:9,fontWeight:700,padding:"1px 5px",borderRadius:99,minWidth:16,textAlign:"center"}}>{activeAlerts}</span>}
+        {n.id==="alerts"&&alertCount>0&&<span style={{position:"absolute",right:12,background:C.r,color:"#fff",fontSize:9,fontWeight:700,padding:"1px 5px",borderRadius:99,minWidth:16,textAlign:"center"}}>{alertCount}</span>}
       </button>})}
       <div style={{flex:1}}/>
-      <div style={{padding:"10px 18px",borderTop:"1px solid "+C.border,fontSize:10,color:C.txM,fontFamily:M}}>v0.1.0 · <span style={{color:C.g}}>●</span> Connected</div>
+      <button onClick={handleLogout} style={{display:"flex",alignItems:"center",gap:10,padding:"9px 18px",margin:"1px 8px",borderRadius:6,border:"none",cursor:"pointer",fontFamily:F,fontSize:13,fontWeight:400,color:C.txD,background:"transparent",textAlign:"left"}}>
+        <Sv d={iLogout} s={16} c={C.txD}/> Logout
+      </button>
+      <div style={{padding:"10px 18px",borderTop:"1px solid "+C.border,fontSize:10,color:C.txM,fontFamily:M}}>v0.1.0 | <span style={{color:C.g}}>●</span> Connected</div>
     </nav>
     <main style={{flex:1,overflow:"auto",padding:"24px 32px"}}>{renderPage()}</main>
-    {showAdd&&<AddInstanceModal onClose={()=>setShowAdd(false)} onSave={handleAddSave}/>}
+    {showAdd&&<AddInstanceModal onClose={()=>setShowAdd(false)} onSave={()=>{setShowAdd(false);setRefreshKey(k=>k+1);}}/>}
     <style>{`
       @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700;800&display=swap');
       @keyframes spin{to{transform:rotate(360deg)}}
@@ -362,6 +1627,7 @@ export default function App(){
       ::-webkit-scrollbar-thumb{background:${C.border};border-radius:3px}
       ::-webkit-scrollbar-thumb:hover{background:${C.borderL}}
       input::placeholder{color:${C.txM}}
+      select{-webkit-appearance:auto}
     `}</style>
   </div>;
 }

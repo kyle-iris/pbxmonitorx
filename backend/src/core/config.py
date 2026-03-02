@@ -24,6 +24,15 @@ class Settings(BaseSettings):
     max_login_attempts: int = 5
     lockout_minutes: int = 15
 
+    # Azure AD SSO
+    azure_ad_enabled: bool = False
+    azure_ad_tenant_id: str = ""
+    azure_ad_client_id: str = ""
+    azure_ad_client_secret: str = ""
+    azure_ad_redirect_uri: str = "http://localhost:8000/api/auth/sso/callback"
+    azure_ad_auto_create_users: bool = True
+    azure_ad_default_role: str = "viewer"
+
     @property
     def master_key_bytes(self) -> bytes:
         return bytes.fromhex(self.master_key)
