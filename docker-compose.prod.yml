@@ -23,13 +23,14 @@ services:
     restart: unless-stopped
     ports:
       - "80:80"
-      - "8443:8443"
+      - "443:443"
     environment:
       DOMAIN: ${DOMAIN}
     volumes:
       - ./deploy/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
       - ./deploy/nginx/templates/default.conf.template:/etc/nginx/templates/default.conf.template:ro
       - /etc/letsencrypt:/etc/letsencrypt:ro
+      - certbotdata:/var/www/certbot:ro
     command: ["/bin/sh", "-c", "envsubst '$$DOMAIN' < /etc/nginx/templates/default.conf.template > /etc/nginx/conf.d/default.conf && exec nginx -g 'daemon off;'"]
     depends_on:
       - backend
@@ -149,6 +150,7 @@ volumes:
   pgdata:
   redisdata:
   backupdata:
+  certbotdata:
 
 networks:
   frontend:
