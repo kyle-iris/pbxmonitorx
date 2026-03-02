@@ -1570,6 +1570,7 @@ export default function App(){
     {id:"backups",l:"Backups",d:iDl},
     {id:"alerts",l:"Alerts",d:"M15 17h5l-1.405-1.405A2.032 2.032 0 0118 14.158V11a6 6 0 00-5-5.917V4a1 1 0 10-2 0v1.083A6 6 0 006 11v3.159c0 .538-.214 1.055-.595 1.436L4 17h5m6 0a3 3 0 11-6 0"},
     {id:"audit",l:"Audit Log",d:"M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2"},
+    ...(isAdmin?[{id:"eventlog",l:"Event Log",d:iW}]:[]),
     ...(isAdmin?[{id:"users",l:"Users",d:iUser}]:[]),
     ...(isAdmin?[{id:"settings",l:"Settings",d:"M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.066 2.573c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.573 1.066c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.066-2.573c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065zM15 12a3 3 0 11-6 0 3 3 0 016 0z"}]:[]),
   ];
@@ -1584,6 +1585,7 @@ export default function App(){
       case"backups":return<BackupsPage/>;
       case"alerts":return<AlertsPage/>;
       case"audit":return<AuditPage/>;
+      case"eventlog":return isAdmin?<EventLogPage/>:<DashboardPage onNavigate={navigate}/>;
       case"users":return isAdmin?<UsersPage/>:<DashboardPage onNavigate={navigate}/>;
       case"settings":return isAdmin?<SettingsPage/>:<DashboardPage onNavigate={navigate}/>;
       default:return<DashboardPage onNavigate={navigate}/>;
