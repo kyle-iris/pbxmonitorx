@@ -134,9 +134,9 @@ ufw default deny incoming
 ufw default allow outgoing
 ufw allow 22/tcp    comment 'SSH'
 ufw allow 80/tcp    comment 'HTTP (redirect to HTTPS)'
-ufw allow 443/tcp   comment 'HTTPS'
+ufw allow 8443/tcp  comment 'HTTPS'
 ufw --force enable
-log "Firewall configured: SSH(22), HTTP(80), HTTPS(443)"
+log "Firewall configured: SSH(22), HTTP(80), HTTPS(8443)"
 
 # ── 7. FAIL2BAN ────────────────────────────────────────────────────────
 log "Configuring fail2ban..."
@@ -206,9 +206,9 @@ echo ""
 echo "═══════════════════════════════════════════════════════════"
 echo -e "  ${GREEN}PBXMonitorX is running!${NC}"
 echo ""
-echo "  URL:        https://$DOMAIN"
-echo "  API Docs:   https://$DOMAIN/api/docs"
-echo "  API Health: https://$DOMAIN/api/health"
+echo "  URL:        https://$DOMAIN:8443"
+echo "  API Docs:   https://$DOMAIN:8443/api/docs"
+echo "  API Health: https://$DOMAIN:8443/api/health"
 echo ""
 echo "  Default login:"
 echo "    Username: admin"
