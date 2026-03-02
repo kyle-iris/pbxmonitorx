@@ -176,15 +176,32 @@ generate_self_signed() {
         -keyout "$CERT_DIR/privkey.pem" \
         -out "$CERT_DIR/fullchain.pem" \
         -subj "/CN=$DOMAIN" 2>/dev/null
-    # Create the Let's Encrypt directory structure so nginx config works
-    mkdir -p "$APP_DIR/certbot/conf/live/$DOMAIN"
-    cp "$CERT_DIR/fullchain.pem" "$APP_DIR/certbot/conf/live/$DOMAIN/fullchain.pem"
-    cp "$CERT_DIR/privkey.pem" "$APP_DIR/certbot/conf/live/$DOMAIN/privkey.pem"
+}
+
+inject_certs_into_volume() {
+    # Ensure the certbot-etc Docker volume has the certs so nginx can find them
+    # We use a temporary alpine container to copy the local certs into the volume
+    log "Injecting certificates into Docker volume..."
+    local COMPOSE_PROJECT
+    COMPOSE_PROJECT=$(docker compose -f "$APP_DIR/docker-compose.prod.yml" config --format json 2>/dev/null | grep -o '"name":"[^"]*"' | head -1 | cut -d'"' -f4 || echo "")
+    # Fallback: derive project name from directory
+    if [[ -z "$COMPOSE_PROJECT" ]]; then
+        COMPOSE_PROJECT=$(basename "$APP_DIR" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]//g')
+    fi
+    local VOLUME_NAME="${COMPOSE_PROJECT}_certbot-etc"
+    # Create the volume if it doesn't exist
+    docker volume create "$VOLUME_NAME" >/dev/null 2>&1 || true
+    docker run --rm \
+        -v "$CERT_DIR:/src:ro" \
+        -v "${VOLUME_NAME}:/etc/letsencrypt" \
+        alpine sh -c "mkdir -p /etc/letsencrypt/live/$DOMAIN && cp /src/fullchain.pem /src/privkey.pem /etc/letsencrypt/live/$DOMAIN/"
+    log "Certificates installed into volume $VOLUME_NAME"
 }
 
 if [[ "$SKIP_SSL" == true ]]; then
     warn "Skipping Let's Encrypt (--skip-ssl flag set)"
     generate_self_signed
+    inject_certs_into_volume
     warn "Using self-signed certificate. Run this later to get a real cert:"
     warn "  cd $APP_DIR && sudo bash deploy/setup-ssl.sh"
 else
@@ -220,6 +237,7 @@ EOF
         warn "Let's Encrypt failed (DNS not ready? Port 80 blocked?)"
         warn "Falling back to self-signed certificate."
         generate_self_signed
+        inject_certs_into_volume
     fi
 
     # Stop the temp nginx
