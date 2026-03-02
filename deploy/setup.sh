@@ -23,6 +23,14 @@ GITHUB_REPO="${GITHUB_REPO:-}"
 DOMAIN="${DOMAIN:-}"
 EMAIL="${EMAIL:-}"
 APP_DIR="/opt/pbxmonitorx"
+SKIP_SSL=false
+
+# Parse flags
+for arg in "$@"; do
+    case "$arg" in
+        --skip-ssl) SKIP_SSL=true ;;
+    esac
+done
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -157,15 +165,36 @@ systemctl enable fail2ban
 systemctl restart fail2ban
 
 # ── 9. SSL CERTIFICATE ─────────────────────────────────────────────────
-log "Obtaining Let's Encrypt certificate for $DOMAIN..."
 
-# First start nginx without SSL to serve ACME challenge
-# Create a temporary nginx config for initial cert
-mkdir -p "$APP_DIR/deploy/nginx/conf.d.bak"
-cp "$APP_DIR/deploy/nginx/conf.d/pbxmonitorx.conf" "$APP_DIR/deploy/nginx/conf.d.bak/"
+# Always generate a self-signed cert as a fallback so nginx can start
+CERT_DIR="$APP_DIR/deploy/nginx/certs"
+mkdir -p "$CERT_DIR"
 
-# Temporary HTTP-only config for cert issuance
-cat > "$APP_DIR/deploy/nginx/conf.d/pbxmonitorx.conf" <<EOF
+generate_self_signed() {
+    log "Generating self-signed certificate (fallback)..."
+    openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
+        -keyout "$CERT_DIR/privkey.pem" \
+        -out "$CERT_DIR/fullchain.pem" \
+        -subj "/CN=$DOMAIN" 2>/dev/null
+    # Create the Let's Encrypt directory structure so nginx config works
+    mkdir -p "$APP_DIR/certbot/conf/live/$DOMAIN"
+    cp "$CERT_DIR/fullchain.pem" "$APP_DIR/certbot/conf/live/$DOMAIN/fullchain.pem"
+    cp "$CERT_DIR/privkey.pem" "$APP_DIR/certbot/conf/live/$DOMAIN/privkey.pem"
+}
+
+if [[ "$SKIP_SSL" == true ]]; then
+    warn "Skipping Let's Encrypt (--skip-ssl flag set)"
+    generate_self_signed
+    warn "Using self-signed certificate. Run this later to get a real cert:"
+    warn "  cd $APP_DIR && sudo bash deploy/setup-ssl.sh"
+else
+    log "Attempting Let's Encrypt certificate for $DOMAIN..."
+
+    # Save the full SSL config and use a temp HTTP-only config for cert issuance
+    mkdir -p "$APP_DIR/deploy/nginx/conf.d.bak"
+    cp "$APP_DIR/deploy/nginx/conf.d/pbxmonitorx.conf" "$APP_DIR/deploy/nginx/conf.d.bak/"
+
+    cat > "$APP_DIR/deploy/nginx/conf.d/pbxmonitorx.conf" <<EOF
 server {
     listen 80;
     server_name $DOMAIN;
@@ -174,24 +203,37 @@ server {
 }
 EOF
 
-# Start nginx temporarily
-cd "$APP_DIR"
-docker compose -f docker-compose.prod.yml up -d nginx
+    cd "$APP_DIR"
+    docker compose -f docker-compose.prod.yml up -d nginx
+    sleep 3
 
-# Wait for nginx
-sleep 3
+    # Run certbot with a 60-second timeout so it doesn't hang
+    CERT_OK=false
+    if timeout 60 docker compose -f docker-compose.prod.yml run --rm certbot \
+        certbot certonly --webroot -w /var/www/certbot \
+        --email "$EMAIL" --agree-tos --no-eff-email \
+        --non-interactive \
+        -d "$DOMAIN" 2>&1; then
+        CERT_OK=true
+        log "SSL certificate obtained from Let's Encrypt"
+    else
+        warn "Let's Encrypt failed (DNS not ready? Port 80 blocked?)"
+        warn "Falling back to self-signed certificate."
+        generate_self_signed
+    fi
 
-# Run certbot
-docker compose -f docker-compose.prod.yml run --rm certbot \
-    certbot certonly --webroot -w /var/www/certbot \
-    --email "$EMAIL" --agree-tos --no-eff-email \
-    -d "$DOMAIN"
+    # Stop the temp nginx
+    docker compose -f docker-compose.prod.yml down nginx 2>/dev/null || true
 
-# Restore full SSL config
-cp "$APP_DIR/deploy/nginx/conf.d.bak/pbxmonitorx.conf" "$APP_DIR/deploy/nginx/conf.d/pbxmonitorx.conf"
-sed -i "s/REPLACE_DOMAIN/$DOMAIN/g" "$APP_DIR/deploy/nginx/conf.d/pbxmonitorx.conf"
+    # Restore full SSL config
+    cp "$APP_DIR/deploy/nginx/conf.d.bak/pbxmonitorx.conf" "$APP_DIR/deploy/nginx/conf.d/pbxmonitorx.conf"
+    sed -i "s/REPLACE_DOMAIN/$DOMAIN/g" "$APP_DIR/deploy/nginx/conf.d/pbxmonitorx.conf"
 
-log "SSL certificate obtained"
+    if [[ "$CERT_OK" == false ]]; then
+        warn "To get a real certificate later, run:"
+        warn "  cd $APP_DIR && sudo bash deploy/setup-ssl.sh"
+    fi
+fi
 
 # ── 10. CREATE BACKUP DIRECTORY ─────────────────────────────────────────
 mkdir -p /data/backups
